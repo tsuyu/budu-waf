@@ -172,10 +172,11 @@ setup in [FAIL2BAN.md](FAIL2BAN.md). The recommended action writes bans into
 `[reputation] blocklist_file` and `systemctl reload budu` (SIGHUP) — banning at
 the WAF layer, which is what works in the standard edge-proxy topology.
 
-## Manual bans (CLI)
+## Manual bans (CLI) — `--features fail2ban`
 
-Ban/unban by hand against the same `[reputation] blocklist_file` (with the same
-auto-expiring `until=` format as Fail2Ban):
+Built with `--features fail2ban`, you can ban/unban by hand against the same
+`[reputation] blocklist_file` (with the same auto-expiring `until=` format as
+Fail2Ban):
 
 ```bash
 budu -c /etc/budu/budu.toml ban 203.0.113.45 --for 1h --reload  # apply immediately

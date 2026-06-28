@@ -8,6 +8,9 @@ rust-version.workspace = true
 [features]
 geoip = ["dep:maxminddb"]
 remote-blocklist = ["dep:reqwest"]
+# Timed (auto-expiring) blocklist entries — the `until=<epoch>` line syntax used
+# by the fail2ban integration. Off → entries are always permanent.
+fail2ban = []
 
 [dependencies]
 budu-common = { workspace = true }

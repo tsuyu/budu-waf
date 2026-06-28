@@ -15,6 +15,7 @@ use budu_pipeline::{Pipeline, Reloadable};
 use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "fail2ban")]
 mod ban;
 
 #[derive(Parser)]
@@ -46,6 +47,7 @@ enum Command {
     },
     /// Add an IP/CIDR to the blocklist file, optionally time-limited. The
     /// running proxy applies it on the next reload (SIGHUP / refresh timer).
+    #[cfg(feature = "fail2ban")]
     Ban {
         /// IP or CIDR to block, e.g. 203.0.113.45 or 203.0.113.0/24.
         target: String,
@@ -58,6 +60,7 @@ enum Command {
         reload: bool,
     },
     /// Remove an IP/CIDR from the blocklist file.
+    #[cfg(feature = "fail2ban")]
     Unban {
         /// IP or CIDR to unblock.
         target: String,
@@ -67,6 +70,7 @@ enum Command {
         reload: bool,
     },
     /// List current blocklist-file entries with their remaining TTL.
+    #[cfg(feature = "fail2ban")]
     Bans,
 }
 
@@ -93,12 +97,15 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::ImportCrs { files, out } => import_crs(files, out),
+        #[cfg(feature = "fail2ban")]
         Command::Ban { target, duration, reload } => {
             ban::ban(&Config::load(&cli.config)?, &target, duration.as_deref(), reload)
         }
+        #[cfg(feature = "fail2ban")]
         Command::Unban { target, reload } => {
             ban::unban(&Config::load(&cli.config)?, &target, reload)
         }
+        #[cfg(feature = "fail2ban")]
         Command::Bans => ban::list(&Config::load(&cli.config)?),
         Command::Run => run(cli.config),
     }
@@ -157,8 +164,16 @@ fn run(config_path: PathBuf) -> anyhow::Result<()> {
     let metrics = Arc::new(budu_common::Metrics::default());
     let admin_listen = initial.metrics.listen;
     // Write the pidfile (if configured) so `budu ban --reload` can find us; the
-    // guard removes it on the way out.
+    // guard removes it on the way out. Only with the `fail2ban` feature.
+    #[cfg(feature = "fail2ban")]
     let _pidfile = ban::PidFile::write(&initial.server.pidfile)?;
+    #[cfg(not(feature = "fail2ban"))]
+    if !initial.server.pidfile.trim().is_empty() {
+        tracing::warn!(
+            "[server] pidfile is set but this build lacks the `fail2ban` feature; \
+             it is ignored. Rebuild with --features fail2ban."
+        );
+    }
     let config = Arc::new(ArcSwap::from_pointee(initial));
     let pipeline = Arc::new(pipeline);
 

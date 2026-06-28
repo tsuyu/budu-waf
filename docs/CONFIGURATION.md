@@ -27,7 +27,7 @@ All other sections have defaults and may be omitted.
 | `enforcement` | `block` \| `detect` | `block` | `detect` = **detection-only**: evaluate every layer and log/meter what it *would* block, but forward the request anyway. Resource limits (rate-limit `429`, body-size `413`) stay enforced in both modes. |
 | `upstream_timeout_secs` | integer > 0 | `30` | Max wait for the backend before answering `504`. |
 | `timezone` | offset string | `""` (UTC) | Default timezone for `time_between` rules, e.g. `"+08:00"`, `"-05:30"`. A per-rule `tz` overrides it. Invalid values are rejected at startup / `check`. |
-| `pidfile` | path | `""` (off) | Where `budu run` writes its PID (removed on exit). Lets `budu ban/unban --reload` signal the running proxy with `SIGHUP`. |
+| `pidfile` | path | `""` (off) | Where `budu run` writes its PID (removed on exit). Lets `budu ban/unban --reload` signal the running proxy with `SIGHUP`. **Requires `--features fail2ban`** (ignored otherwise, with a warning). |
 
 The `listen` address is read once at startup; changing it needs a restart.
 `upstream`, `limits`, `inspect`, and the rule/signature/blocklist sources all
@@ -78,7 +78,7 @@ plus a trusted-IP allowlist.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `blocklist` | array of CIDRs | `[]` | Inline entries, e.g. `["203.0.113.0/24", "10.0.0.5/32"]`. |
-| `blocklist_file` | path | `""` | Local file, one entry per line: `CIDR_or_IP [until=<unix_epoch>]`. An `until=` makes it a **timed** ban that auto-expires (checked per request, pruned on the maintenance tick) — used by the [Fail2Ban](FAIL2BAN.md) integration. `#` comments and blank lines ignored. |
+| `blocklist_file` | path | `""` | Local file, one entry per line: `CIDR_or_IP [until=<unix_epoch>]`. With `--features fail2ban`, an `until=` makes it a **timed** ban that auto-expires (checked per request, pruned on the maintenance tick); without the feature `until=` is ignored and the entry is permanent. `#` comments and blank lines ignored. |
 | `blocklist_urls` | array of URLs | `[]` | External HTTP(S) feeds in the same line format. **Requires `--features remote-blocklist`.** |
 | `refresh_secs` | integer | `300` | How often to re-fetch `blocklist_urls`. `0` = fetch once at startup. |
 | `allowlist` | array of CIDRs | `[]` | **Trusted IPs that fully bypass inspection** — see below. |

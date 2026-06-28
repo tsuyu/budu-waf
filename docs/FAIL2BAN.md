@@ -5,6 +5,12 @@ scoring, rate limits) and records each block to its **audit log**. Fail2Ban
 watches that log and escalates repeat offenders to a longer ban — either at the
 WAF (B.U.D.U's own blocklist) or at the firewall.
 
+> **Build with the `fail2ban` feature** for the auto-expiring `until=` blocklist
+> entries and the `ban`/`unban`/`bans` CLI: `cargo build --release --features
+> fail2ban`. The external Fail2Ban filter/jail work without it too — but bans
+> written with `until=` won't auto-expire (they're treated as permanent), so
+> prefer the firewall action or a feature-enabled build in that case.
+
 Ready-to-use config lives in [`contrib/fail2ban/`](../contrib/fail2ban/):
 
 ```

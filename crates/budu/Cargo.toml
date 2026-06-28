@@ -13,6 +13,11 @@ path = "src/main.rs"
 geoip = ["budu-pipeline/geoip"]
 remote-blocklist = ["budu-pipeline/remote-blocklist"]
 libinjection = ["budu-pipeline/libinjection"]
+# fail2ban integration: the ban/unban/bans CLI, pidfile + `--reload`, and
+# auto-expiring `until=` blocklist entries. Off by default.
+fail2ban = ["dep:ipnet", "budu-pipeline/fail2ban"]
+# Convenience: enable every optional feature in one shot (for release builds).
+full = ["geoip", "remote-blocklist", "libinjection", "fail2ban"]
 
 [dependencies]
 budu-common        = { workspace = true }
@@ -20,7 +25,7 @@ budu-config        = { workspace = true }
 budu-proxy         = { workspace = true }
 budu-pipeline      = { workspace = true }
 budu-rules         = { workspace = true }
-ipnet              = { workspace = true }
+ipnet              = { workspace = true, optional = true }
 tokio              = { workspace = true }
 tokio-util         = { workspace = true }
 arc-swap           = { workspace = true }

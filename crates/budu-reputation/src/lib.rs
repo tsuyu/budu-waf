@@ -153,7 +153,6 @@ impl ReputationStage {
 /// a **timed** entry that auto-expires. Already-expired and malformed lines are
 /// logged and skipped — one bad entry never sinks the whole list.
 pub fn parse_blocklist(text: &str, source: &str) -> Vec<BlockEntry> {
-    let now = now_secs();
     let mut out = Vec::new();
     for (n, raw) in text.lines().enumerate() {
         let line = raw.split('#').next().unwrap_or("").trim();
@@ -172,30 +171,46 @@ pub fn parse_blocklist(text: &str, source: &str) -> Vec<BlockEntry> {
                 continue;
             }
         };
-        // Optional `until=<epoch>` token → timed entry.
-        let mut until = None;
-        let mut bad = false;
-        for tok in tokens {
-            if let Some(v) = tok.strip_prefix("until=") {
-                match v.parse::<u64>() {
-                    Ok(ts) => until = Some(ts),
-                    Err(_) => {
-                        tracing::warn!(source, line = n + 1, value = tok, "skipping entry with invalid `until`");
-                        bad = true;
-                    }
-                }
-            }
-        }
-        if bad {
-            continue;
-        }
-        // Drop entries that have already expired.
-        if until.is_some_and(|u| u <= now) {
-            continue;
-        }
+        // Optional `until=<epoch>` (with the `fail2ban` feature); a malformed or
+        // already-expired entry is skipped. Without the feature, timed bans are
+        // disabled and every entry is permanent.
+        let until = match line_until(tokens, source, n) {
+            Some(u) => u,
+            None => continue,
+        };
         out.push(BlockEntry { net, until });
     }
     out
+}
+
+/// Resolve a line's `until=` expiry. `Some(opt)` → use `opt`; `None` → skip the
+/// line (malformed / already expired).
+#[cfg(feature = "fail2ban")]
+fn line_until<'a>(tokens: impl Iterator<Item = &'a str>, source: &str, n: usize) -> Option<Option<u64>> {
+    let now = now_secs();
+    let mut until = None;
+    for tok in tokens {
+        if let Some(v) = tok.strip_prefix("until=") {
+            match v.parse::<u64>() {
+                Ok(ts) => until = Some(ts),
+                Err(_) => {
+                    tracing::warn!(source, line = n + 1, value = tok, "skipping entry with invalid `until`");
+                    return None;
+                }
+            }
+        }
+    }
+    // Drop entries that have already expired.
+    if until.is_some_and(|u| u <= now) {
+        return None;
+    }
+    Some(until)
+}
+
+/// Without the `fail2ban` feature, `until=` isn't honored — entries are permanent.
+#[cfg(not(feature = "fail2ban"))]
+fn line_until<'a>(_tokens: impl Iterator<Item = &'a str>, _source: &str, _n: usize) -> Option<Option<u64>> {
+    Some(None)
 }
 
 fn load_file(path: &str) -> std::io::Result<Vec<BlockEntry>> {
@@ -306,6 +321,7 @@ mod tests {
         assert!(!contains(&set, &"8.8.8.8".parse().unwrap()));
     }
 
+    #[cfg(feature = "fail2ban")]
     #[test]
     fn timed_ban_active_then_expired() {
         let now = now_secs();

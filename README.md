@@ -54,9 +54,10 @@ client ─────────► edge proxy ─────────► 
 - **Auto-refreshing remote blocklist feeds** *(optional feature)*.
 - **Observability**: structured JSON logs, a separate **audit log** sink, and a
   Prometheus **`/metrics`** + **`/healthz`** admin endpoint.
-- **Fail2Ban integration**: the audit log records the *resolved* client IP, so
-  Fail2Ban can escalate repeat offenders to a WAF or firewall ban — drop-in
-  filter/jail/action in [contrib/fail2ban/](contrib/fail2ban/) (see
+- **Fail2Ban integration** *(optional `fail2ban` feature)*: the audit log records
+  the *resolved* client IP, so Fail2Ban can escalate repeat offenders to a WAF or
+  firewall ban — drop-in filter/jail/action in [contrib/fail2ban/](contrib/fail2ban/),
+  plus `ban`/`unban`/`bans` CLI and auto-expiring bans (see
   [docs/FAIL2BAN.md](docs/FAIL2BAN.md)).
 - **Resilient by design**: every inspection stage runs under `catch_unwind`; one
   bad request can't take the proxy (or the app) down. Fail-closed or fail-open is
@@ -88,9 +89,9 @@ Commands:
   run         Run the WAF proxy (default if omitted)
   check       Load + validate config, compile rules/signatures, then exit
   import-crs  Convert ModSecurity / OWASP CRS SecRule files to a budu rules TOML
-  ban         Add an IP/CIDR to the blocklist file (optionally time-limited)
-  unban       Remove an IP/CIDR from the blocklist file
-  bans        List blocklist-file entries with remaining TTL
+  ban         Add an IP/CIDR to the blocklist file        [--features fail2ban]
+  unban       Remove an IP/CIDR from the blocklist file    [--features fail2ban]
+  bans        List blocklist-file entries with remaining TTL [--features fail2ban]
 
 Options:
   -c, --config <CONFIG>   Path to the TOML config [default: config/budu.toml]
@@ -115,11 +116,14 @@ lean (no TLS / GeoIP dependencies):
 | `geoip` | Country allow/block via a MaxMind DB | `maxminddb` |
 | `remote-blocklist` | Fetch + auto-refresh external blocklist feeds over HTTP(S) | `reqwest` (rustls) |
 | `libinjection` | `detect_sqli` / `detect_xss` rule operators (low false positives) | `libinjectionrs` (pure Rust) |
+| `fail2ban` | `ban`/`unban`/`bans` CLI, pidfile + `--reload`, auto-expiring `until=` blocklist entries | — |
+| `full` | Convenience: all of the above in one flag | (their deps) |
 
 ```bash
 cargo build --release --features geoip
-cargo build --release --features remote-blocklist
-cargo build --release --features "geoip,remote-blocklist"
+cargo build --release --features fail2ban
+cargo build --release --features "geoip,remote-blocklist,fail2ban"
+cargo build --release --features full      # everything (recommended for release builds)
 ```
 
 Enabling a config option whose feature isn't compiled in (e.g. `geoip.enabled`

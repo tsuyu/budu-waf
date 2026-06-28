@@ -9,6 +9,7 @@ rust-version.workspace = true
 geoip = ["budu-reputation/geoip"]
 remote-blocklist = ["budu-reputation/remote-blocklist"]
 libinjection = ["budu-rules/libinjection"]
+fail2ban = ["budu-reputation/fail2ban"]
 
 [dependencies]
 budu-common     = { workspace = true }
