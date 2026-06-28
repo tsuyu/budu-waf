@@ -20,6 +20,7 @@ budu-config        = { workspace = true }
 budu-proxy         = { workspace = true }
 budu-pipeline      = { workspace = true }
 budu-rules         = { workspace = true }
+ipnet              = { workspace = true }
 tokio              = { workspace = true }
 tokio-util         = { workspace = true }
 arc-swap           = { workspace = true }

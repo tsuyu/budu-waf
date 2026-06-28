@@ -265,10 +265,13 @@ impl Reloadable {
         Ok(())
     }
 
-    /// Periodic maintenance (rate-limit bucket + stateful counter GC).
+    /// Periodic maintenance: rate-limit bucket + stateful counter GC, plus
+    /// reclaiming expired timed blocklist/allowlist entries (fail2ban WAF bans).
     pub fn run_maintenance(&self) {
         self.ratelimit.run_maintenance();
         self.rules_counters.run_maintenance();
+        budu_reputation::prune_expired(&self.reputation);
+        budu_reputation::prune_expired(&self.allowlist);
     }
 
     pub fn metrics(&self) -> PipelineMetrics {

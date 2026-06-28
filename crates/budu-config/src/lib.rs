@@ -69,6 +69,10 @@ pub struct ServerConfig {
     /// e.g. `"+08:00"`. Empty = UTC. A per-rule `tz` always overrides this.
     #[serde(default)]
     pub timezone: String,
+    /// Optional path where `budu run` writes its PID (and removes on exit). Lets
+    /// `budu ban --reload` signal the running proxy with `SIGHUP`. Empty = off.
+    #[serde(default)]
+    pub pidfile: String,
 }
 
 fn default_upstream_timeout() -> u64 {

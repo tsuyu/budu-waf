@@ -54,6 +54,10 @@ client ─────────► edge proxy ─────────► 
 - **Auto-refreshing remote blocklist feeds** *(optional feature)*.
 - **Observability**: structured JSON logs, a separate **audit log** sink, and a
   Prometheus **`/metrics`** + **`/healthz`** admin endpoint.
+- **Fail2Ban integration**: the audit log records the *resolved* client IP, so
+  Fail2Ban can escalate repeat offenders to a WAF or firewall ban — drop-in
+  filter/jail/action in [contrib/fail2ban/](contrib/fail2ban/) (see
+  [docs/FAIL2BAN.md](docs/FAIL2BAN.md)).
 - **Resilient by design**: every inspection stage runs under `catch_unwind`; one
   bad request can't take the proxy (or the app) down. Fail-closed or fail-open is
   configurable.
@@ -84,6 +88,9 @@ Commands:
   run         Run the WAF proxy (default if omitted)
   check       Load + validate config, compile rules/signatures, then exit
   import-crs  Convert ModSecurity / OWASP CRS SecRule files to a budu rules TOML
+  ban         Add an IP/CIDR to the blocklist file (optionally time-limited)
+  unban       Remove an IP/CIDR from the blocklist file
+  bans        List blocklist-file entries with remaining TTL
 
 Options:
   -c, --config <CONFIG>   Path to the TOML config [default: config/budu.toml]

@@ -7,6 +7,7 @@ on_error         = "closed"                    # closed | open
 enforcement      = "block"                     # block | detect (detect = log-only, forward anyway)
 upstream_timeout_secs = 30                     # give up on a hung backend → 504
 timezone         = "+08:00"                     # default tz for `time_between` rules ("" = UTC)
+pidfile          = "/run/budu.pid"              # PID written here; enables `budu ban --reload` ("" = off)
 
 [limits]
 max_uri_len      = 8192

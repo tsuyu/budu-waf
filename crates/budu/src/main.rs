@@ -15,6 +15,8 @@ use budu_pipeline::{Pipeline, Reloadable};
 use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
 
+mod ban;
+
 #[derive(Parser)]
 #[command(name = "budu", version, about = "B.U.D.U — inline reverse-proxy WAF")]
 struct Cli {
@@ -42,6 +44,30 @@ enum Command {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    /// Add an IP/CIDR to the blocklist file, optionally time-limited. The
+    /// running proxy applies it on the next reload (SIGHUP / refresh timer).
+    Ban {
+        /// IP or CIDR to block, e.g. 203.0.113.45 or 203.0.113.0/24.
+        target: String,
+        /// Auto-expire after this long, e.g. 30m, 1h, 7d (omit = permanent).
+        #[arg(long = "for", value_name = "DURATION")]
+        duration: Option<String>,
+        /// Signal the running proxy (SIGHUP) to apply immediately. Requires
+        /// `[server] pidfile`.
+        #[arg(long)]
+        reload: bool,
+    },
+    /// Remove an IP/CIDR from the blocklist file.
+    Unban {
+        /// IP or CIDR to unblock.
+        target: String,
+        /// Signal the running proxy (SIGHUP) to apply immediately. Requires
+        /// `[server] pidfile`.
+        #[arg(long)]
+        reload: bool,
+    },
+    /// List current blocklist-file entries with their remaining TTL.
+    Bans,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -67,6 +93,13 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::ImportCrs { files, out } => import_crs(files, out),
+        Command::Ban { target, duration, reload } => {
+            ban::ban(&Config::load(&cli.config)?, &target, duration.as_deref(), reload)
+        }
+        Command::Unban { target, reload } => {
+            ban::unban(&Config::load(&cli.config)?, &target, reload)
+        }
+        Command::Bans => ban::list(&Config::load(&cli.config)?),
         Command::Run => run(cli.config),
     }
 }
@@ -123,6 +156,9 @@ fn run(config_path: PathBuf) -> anyhow::Result<()> {
     let (pipeline, reloadable) = Pipeline::from_config(&initial)?;
     let metrics = Arc::new(budu_common::Metrics::default());
     let admin_listen = initial.metrics.listen;
+    // Write the pidfile (if configured) so `budu ban --reload` can find us; the
+    // guard removes it on the way out.
+    let _pidfile = ban::PidFile::write(&initial.server.pidfile)?;
     let config = Arc::new(ArcSwap::from_pointee(initial));
     let pipeline = Arc::new(pipeline);
 

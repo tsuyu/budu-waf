@@ -1,8 +1,10 @@
 //! Reputation layer (§8 step 2): a CIDR blocklist checked against the resolved
 //! client IP. Fast and first — drops known-bad sources before any other work.
 
+use std::net::IpAddr;
 use std::ops::ControlFlow;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use budu_common::{RequestCtx, Stage, WafDecision};
@@ -15,13 +17,54 @@ mod geoip;
 #[cfg(feature = "geoip")]
 pub use geoip::GeoStage;
 
-/// Shared, atomically-swappable blocklist handle (§9 hot-reload).
-pub type SharedBlocks = Arc<ArcSwap<Vec<IpNet>>>;
+/// A blocklist (or allowlist) entry: a CIDR plus an optional expiry as a UNIX
+/// timestamp (seconds). `until = None` is permanent; a timed entry stops
+/// matching once `until <= now`, so a fail2ban-style WAF ban **auto-expires**
+/// even if its unban is never delivered. Written into a list file as
+/// `IP until=<epoch>`.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockEntry {
+    pub net: IpNet,
+    pub until: Option<u64>,
+}
 
-/// Build the effective blocklist from config: inline `blocklist` merged with
-/// `blocklist_file`.
-pub fn build_blocks(cfg: &ReputationConfig) -> std::io::Result<Vec<IpNet>> {
-    let mut blocks = cfg.blocklist.clone();
+impl BlockEntry {
+    pub fn perm(net: IpNet) -> Self {
+        Self { net, until: None }
+    }
+
+    /// Still in force at `now` (epoch seconds)?
+    pub fn active(&self, now: u64) -> bool {
+        self.until.is_none_or(|u| u > now)
+    }
+
+    /// Matches `ip` and hasn't expired.
+    pub fn matches(&self, ip: &IpAddr, now: u64) -> bool {
+        self.active(now) && self.net.contains(ip)
+    }
+}
+
+impl From<IpNet> for BlockEntry {
+    fn from(net: IpNet) -> Self {
+        Self::perm(net)
+    }
+}
+
+/// Current UNIX time in seconds (0 if the clock is before the epoch).
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Shared, atomically-swappable block/allow list handle (§9 hot-reload).
+pub type SharedBlocks = Arc<ArcSwap<Vec<BlockEntry>>>;
+
+/// Build the effective blocklist from config: inline `blocklist` (permanent)
+/// merged with `blocklist_file` (which may carry per-entry `until=` expiries).
+pub fn build_blocks(cfg: &ReputationConfig) -> std::io::Result<Vec<BlockEntry>> {
+    let mut blocks: Vec<BlockEntry> = cfg.blocklist.iter().copied().map(BlockEntry::perm).collect();
     if !cfg.blocklist_file.trim().is_empty() {
         blocks.extend(load_file(&cfg.blocklist_file)?);
     }
@@ -30,8 +73,8 @@ pub fn build_blocks(cfg: &ReputationConfig) -> std::io::Result<Vec<IpNet>> {
 
 /// Build the trusted-IP allowlist from config: inline `allowlist` merged with
 /// `allowlist_file`.
-pub fn build_allowlist(cfg: &ReputationConfig) -> std::io::Result<Vec<IpNet>> {
-    let mut allow = cfg.allowlist.clone();
+pub fn build_allowlist(cfg: &ReputationConfig) -> std::io::Result<Vec<BlockEntry>> {
+    let mut allow: Vec<BlockEntry> = cfg.allowlist.iter().copied().map(BlockEntry::perm).collect();
     if !cfg.allowlist_file.trim().is_empty() {
         allow.extend(load_file(&cfg.allowlist_file)?);
     }
@@ -43,9 +86,22 @@ pub fn shared_allowlist(cfg: &ReputationConfig) -> std::io::Result<SharedBlocks>
     Ok(Arc::new(ArcSwap::from_pointee(build_allowlist(cfg)?)))
 }
 
-/// Whether `ip` falls inside any CIDR in `set`.
-pub fn contains(set: &SharedBlocks, ip: &std::net::IpAddr) -> bool {
-    set.load().iter().any(|net| net.contains(ip))
+/// Whether `ip` falls inside any non-expired entry in `set`.
+pub fn contains(set: &SharedBlocks, ip: &IpAddr) -> bool {
+    let now = now_secs();
+    set.load().iter().any(|e| e.matches(ip, now))
+}
+
+/// Drop expired timed entries from a shared list, swapping in the pruned list
+/// only if something actually expired. Called from the maintenance tick so bans
+/// are reclaimed even without a reload.
+pub fn prune_expired(set: &SharedBlocks) {
+    let now = now_secs();
+    let cur = set.load();
+    if cur.iter().any(|e| !e.active(now)) {
+        let kept: Vec<BlockEntry> = cur.iter().copied().filter(|e| e.active(now)).collect();
+        set.store(Arc::new(kept));
+    }
 }
 
 /// CIDR blocklist stage.
@@ -62,10 +118,15 @@ pub struct ReputationStage {
 impl ReputationStage {
     /// Build from config into its own shared handle.
     pub fn from_config(cfg: &ReputationConfig) -> std::io::Result<Self> {
-        Ok(Self::new(build_blocks(cfg)?))
+        Ok(Self::from_entries(build_blocks(cfg)?))
     }
 
+    /// Construct from permanent CIDRs (convenience for callers/tests).
     pub fn new(blocks: Vec<IpNet>) -> Self {
+        Self::from_entries(blocks.into_iter().map(BlockEntry::perm).collect())
+    }
+
+    pub fn from_entries(blocks: Vec<BlockEntry>) -> Self {
         Self {
             blocks: Arc::new(ArcSwap::from_pointee(blocks)),
             rule_id: Arc::from("reputation.blocklist"),
@@ -86,31 +147,58 @@ impl ReputationStage {
     }
 }
 
-/// Parse a CIDR-per-line blocklist body (from a file or a remote feed). Blank
-/// lines and `#` comments are ignored; a bare IP (no `/prefix`) becomes a host
-/// route (`/32` or `/128`). Invalid lines are logged and skipped — one bad
-/// entry never sinks the whole feed.
-pub fn parse_blocklist(text: &str, source: &str) -> Vec<IpNet> {
+/// Parse a list body (from a file or a remote feed). Each non-empty,
+/// non-`#`-comment line is `CIDR_or_IP [until=<unix_epoch_seconds>]`:
+/// a bare IP becomes a host route (`/32`/`/128`); an optional `until=` makes it
+/// a **timed** entry that auto-expires. Already-expired and malformed lines are
+/// logged and skipped — one bad entry never sinks the whole list.
+pub fn parse_blocklist(text: &str, source: &str) -> Vec<BlockEntry> {
+    let now = now_secs();
     let mut out = Vec::new();
     for (n, raw) in text.lines().enumerate() {
         let line = raw.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
             continue;
         }
-        match line
+        let mut tokens = line.split_whitespace();
+        let net_str = tokens.next().unwrap_or("");
+        let net = match net_str
             .parse::<IpNet>()
-            .or_else(|_| line.parse::<std::net::IpAddr>().map(IpNet::from))
+            .or_else(|_| net_str.parse::<IpAddr>().map(IpNet::from))
         {
-            Ok(net) => out.push(net),
+            Ok(net) => net,
             Err(_) => {
-                tracing::warn!(source, line = n + 1, value = line, "skipping invalid CIDR")
+                tracing::warn!(source, line = n + 1, value = net_str, "skipping invalid CIDR");
+                continue;
+            }
+        };
+        // Optional `until=<epoch>` token → timed entry.
+        let mut until = None;
+        let mut bad = false;
+        for tok in tokens {
+            if let Some(v) = tok.strip_prefix("until=") {
+                match v.parse::<u64>() {
+                    Ok(ts) => until = Some(ts),
+                    Err(_) => {
+                        tracing::warn!(source, line = n + 1, value = tok, "skipping entry with invalid `until`");
+                        bad = true;
+                    }
+                }
             }
         }
+        if bad {
+            continue;
+        }
+        // Drop entries that have already expired.
+        if until.is_some_and(|u| u <= now) {
+            continue;
+        }
+        out.push(BlockEntry { net, until });
     }
     out
 }
 
-fn load_file(path: &str) -> std::io::Result<Vec<IpNet>> {
+fn load_file(path: &str) -> std::io::Result<Vec<BlockEntry>> {
     let text = std::fs::read_to_string(path)?;
     Ok(parse_blocklist(&text, path))
 }
@@ -119,7 +207,7 @@ fn load_file(path: &str) -> std::io::Result<Vec<IpNet>> {
 /// that fails to fetch or parse is logged and skipped so a flaky source can't
 /// take the gate down. Requires the `remote-blocklist` feature.
 #[cfg(feature = "remote-blocklist")]
-pub async fn fetch_blocklist_urls(urls: &[String]) -> Vec<IpNet> {
+pub async fn fetch_blocklist_urls(urls: &[String]) -> Vec<BlockEntry> {
     let mut out = Vec::new();
     if urls.is_empty() {
         return out;
@@ -163,7 +251,8 @@ impl Stage for ReputationStage {
 
     fn inspect(&self, ctx: &mut RequestCtx<'_>) -> ControlFlow<WafDecision> {
         let ip = ctx.client.ip;
-        if self.blocks.load().iter().any(|net| net.contains(&ip)) {
+        let now = now_secs();
+        if self.blocks.load().iter().any(|e| e.matches(&ip, now)) {
             return ControlFlow::Break(WafDecision::Block {
                 rule_id: self.rule_id.clone(),
                 status: StatusCode::FORBIDDEN,
@@ -209,12 +298,52 @@ mod tests {
     #[test]
     fn allowlist_contains_matches_cidr_and_host() {
         let set: SharedBlocks = Arc::new(ArcSwap::from_pointee(vec![
-            "192.168.0.0/16".parse::<IpNet>().unwrap(),
-            "203.0.113.7".parse::<IpAddr>().map(IpNet::from).unwrap(),
+            BlockEntry::perm("192.168.0.0/16".parse().unwrap()),
+            BlockEntry::perm("203.0.113.7".parse::<IpAddr>().map(IpNet::from).unwrap()),
         ]));
         assert!(contains(&set, &"192.168.5.5".parse().unwrap()));
         assert!(contains(&set, &"203.0.113.7".parse().unwrap()));
         assert!(!contains(&set, &"8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn timed_ban_active_then_expired() {
+        let now = now_secs();
+        // future expiry → matches; past expiry → does not.
+        let active = parse_blocklist(&format!("203.0.113.9 until={}", now + 3600), "t");
+        assert_eq!(active.len(), 1);
+        let st = ReputationStage::from_entries(active);
+        assert!(matches!(run(&st, "203.0.113.9"), ControlFlow::Break(_)));
+
+        // already-expired lines are dropped at parse time.
+        let expired = parse_blocklist(&format!("203.0.113.9 until={}", now - 1), "t");
+        assert!(expired.is_empty());
+
+        // malformed `until` → line skipped (fail-open, not permanent).
+        assert!(parse_blocklist("203.0.113.9 until=soon", "t").is_empty());
+
+        // permanent line still parses (no until).
+        let perm = parse_blocklist("10.0.0.0/8", "t");
+        assert_eq!(perm.len(), 1);
+        assert!(perm[0].until.is_none());
+    }
+
+    #[test]
+    fn prune_drops_expired_entries() {
+        let now = now_secs();
+        let set: SharedBlocks = Arc::new(ArcSwap::from_pointee(vec![
+            BlockEntry::perm("10.0.0.0/8".parse().unwrap()),
+            BlockEntry {
+                net: "203.0.113.9/32".parse().unwrap(),
+                until: Some(now - 1), // expired
+            },
+        ]));
+        assert_eq!(set.load().len(), 2);
+        // expired entry doesn't match even before pruning
+        assert!(!contains(&set, &"203.0.113.9".parse().unwrap()));
+        prune_expired(&set);
+        assert_eq!(set.load().len(), 1); // expired entry reclaimed
+        assert!(contains(&set, &"10.1.2.3".parse().unwrap()));
     }
 
     #[test]

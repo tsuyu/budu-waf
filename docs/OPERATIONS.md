@@ -162,6 +162,37 @@ merged with `blocklist` + `blocklist_file`. Feed format = one CIDR/IP per line,
 `#` comments allowed. A failed or malformed feed is logged and skipped — the
 previous list stays in force. Watch `budu_blocklist_entries`.
 
+## Fail2Ban
+
+Fail2Ban can watch the audit log and escalate repeat offenders to a WAF or
+firewall ban. The audit `client_ip` is the *resolved* client (from your edge
+header), so the right attacker is banned even behind a proxy. Drop-in
+filter/jail/action are in [`contrib/fail2ban/`](../contrib/fail2ban/); full
+setup in [FAIL2BAN.md](FAIL2BAN.md). The recommended action writes bans into
+`[reputation] blocklist_file` and `systemctl reload budu` (SIGHUP) — banning at
+the WAF layer, which is what works in the standard edge-proxy topology.
+
+## Manual bans (CLI)
+
+Ban/unban by hand against the same `[reputation] blocklist_file` (with the same
+auto-expiring `until=` format as Fail2Ban):
+
+```bash
+budu -c /etc/budu/budu.toml ban 203.0.113.45 --for 1h --reload  # apply immediately
+budu -c /etc/budu/budu.toml ban 203.0.113.0/24                  # permanent CIDR (apply on next reload)
+budu -c /etc/budu/budu.toml bans                                # list entries + remaining TTL
+budu -c /etc/budu/budu.toml unban 203.0.113.45 --reload
+```
+
+Durations: `30m`, `1h`, `7d`, `90s`, or a bare seconds count. Edits are atomic
+and de-duplicated; timed bans auto-expire even without an explicit `unban`.
+
+`--reload` signals the running proxy (`SIGHUP`) so the change takes effect at
+once — it needs **`[server] pidfile`** set (so the CLI can find the process). If
+the reload fails (proxy not running, stale pidfile) the edit is still written and
+the CLI falls back to printing how to apply it. Without `--reload`, changes are
+picked up on the next `SIGHUP` / refresh tick.
+
 ## GeoIP (`--features geoip`)
 
 ```toml

@@ -108,6 +108,18 @@ when = [
   { field = "arg", name = "user.role", op = "eq", value = "admin" },
 ]
 
+# Block when ANY request parameter value equals "8888", whether it came in via
+# the GET query string or a POST body (form-urlencoded / JSON / multipart).
+# `args` = all parameter values; use `arg` (+name) to target one named param.
+[[rule]]
+id = "block-param-8888"
+action = "block"
+status = 403
+msg = "blocked parameter value"
+when = [
+  { field = "args", op = "eq", value = "8888" },
+]
+
 # Multipart uploads: a file part's arg value is its filename — block dangerous
 # upload extensions by name.
 [[rule]]
