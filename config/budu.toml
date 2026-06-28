@@ -1,0 +1,61 @@
+[server]
+listen           = "127.0.0.1:8088"            # LOCK #1: localhost only
+upstream         = "http://192.168.10.20:8080" # the Windows backend Apache
+client_ip_header = "X-Real-IP"                 # single pre-resolved value
+trusted_peer     = "127.0.0.1/32"              # only front Apache
+on_error         = "closed"                    # closed | open
+enforcement      = "block"                     # block | detect (detect = log-only, forward anyway)
+upstream_timeout_secs = 30                     # give up on a hung backend → 504
+
+[limits]
+max_uri_len      = 8192
+max_header_count = 100
+max_inspect_body = "1MiB"
+
+[inspect]
+content_types = ["application/json", "application/x-www-form-urlencoded", "multipart/form-data"]
+
+[ratelimit]
+requests_per_sec = 50
+burst            = 100
+ttl_secs         = 300
+
+[reputation]
+blocklist      = []                 # inline CIDRs, e.g. ["203.0.113.0/24"]
+blocklist_file = ""                 # optional local file, one CIDR/IP per line
+# External feeds (one CIDR/IP per line) — merged in and auto-refreshed.
+# Requires building with `--features remote-blocklist`.
+blocklist_urls = []                 # e.g. ["https://example.com/threat-ips.txt"]
+refresh_secs   = 300               # re-fetch interval; 0 = fetch once at startup
+# Trusted-IP allowlist: matching clients FULLY bypass inspection (no blocking,
+# detection, rate-limit; request + response phases). Use sparingly. Overrides
+# the blocklist if an IP is in both.
+allowlist      = []                 # inline CIDRs, e.g. ["10.0.0.0/8", "203.0.113.7"]
+allowlist_file = ""                 # optional local file, one CIDR/IP per line
+
+[scoring]
+# CRS-style anomaly scoring. `score`-action rules add points; when a request's
+# total reaches `threshold` it is blocked. threshold = 0 disables scoring.
+threshold = 0
+status    = 403
+msg       = "anomaly score threshold exceeded"
+
+[metrics]
+listen = "127.0.0.1:9090"          # admin /metrics + /healthz — keep off the client path
+
+[paths]
+rules      = "config/rules.toml"   # your custom rules (see file for the DSL)
+signatures = ""                    # "" = use the built-in SQLi/XSS/LFI/RCE set;
+                                   # set a path to REPLACE it with your own signatures.toml
+
+[log]
+format     = "json"
+audit_file = "/var/log/budu/audit.log"
+
+[geoip]
+# Requires building with `--features geoip` (pulls in maxminddb). When the
+# feature is absent, enabling this only logs a warning.
+enabled         = false
+db_path         = ""                  # path to a MaxMind GeoLite2-Country.mmdb
+allow_countries = []                  # if set, ONLY these ISO codes pass (allowlist)
+block_countries = []                  # otherwise, block these ISO codes

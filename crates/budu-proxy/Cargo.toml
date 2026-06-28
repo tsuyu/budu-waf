@@ -1,0 +1,21 @@
+[package]
+name = "budu-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+budu-common    = { workspace = true }
+budu-config    = { workspace = true }
+budu-pipeline  = { workspace = true }
+hyper          = { workspace = true }
+hyper-util     = { workspace = true }
+http-body-util = { workspace = true }
+http           = "1"
+bytes          = { workspace = true }
+tokio          = { workspace = true }
+tokio-util     = { workspace = true }
+arc-swap       = { workspace = true }
+tracing        = { workspace = true }
+anyhow         = { workspace = true }

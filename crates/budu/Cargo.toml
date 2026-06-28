@@ -1,0 +1,29 @@
+[package]
+name = "budu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "budu"
+path = "src/main.rs"
+
+[features]
+geoip = ["budu-pipeline/geoip"]
+remote-blocklist = ["budu-pipeline/remote-blocklist"]
+libinjection = ["budu-pipeline/libinjection"]
+
+[dependencies]
+budu-common        = { workspace = true }
+budu-config        = { workspace = true }
+budu-proxy         = { workspace = true }
+budu-pipeline      = { workspace = true }
+budu-rules         = { workspace = true }
+tokio              = { workspace = true }
+tokio-util         = { workspace = true }
+arc-swap           = { workspace = true }
+clap               = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow             = { workspace = true }

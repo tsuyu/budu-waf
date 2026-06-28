@@ -1,0 +1,22 @@
+[package]
+name = "budu-signatures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+budu-common  = { workspace = true }
+budu-config  = { workspace = true }
+budu-parser  = { workspace = true }
+http         = "1"
+aho-corasick = { workspace = true }
+arc-swap     = { workspace = true }
+regex        = { workspace = true }
+serde        = { workspace = true }
+toml         = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+http = "1"

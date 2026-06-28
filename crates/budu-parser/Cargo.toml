@@ -1,0 +1,12 @@
+[package]
+name = "budu-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+budu-common = { workspace = true }
+
+[dev-dependencies]
+http = "1"

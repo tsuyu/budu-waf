@@ -1,0 +1,23 @@
+[package]
+name = "budu-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+geoip = ["budu-reputation/geoip"]
+remote-blocklist = ["budu-reputation/remote-blocklist"]
+libinjection = ["budu-rules/libinjection"]
+
+[dependencies]
+budu-common     = { workspace = true }
+budu-config     = { workspace = true }
+budu-reputation = { workspace = true }
+budu-ratelimit  = { workspace = true }
+budu-parser     = { workspace = true }
+budu-signatures = { workspace = true }
+budu-rules      = { workspace = true }
+http            = "1"
+tracing         = { workspace = true }
+anyhow          = { workspace = true }

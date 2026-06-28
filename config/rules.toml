@@ -1,0 +1,154 @@
+# B.U.D.U custom rules — your own business-logic gate, evaluated in order.
+#
+# Each rule fires only when ALL of its `when` conditions match (logical AND).
+# The first matching block/allow rule wins:
+#   action = "block"  -> answer the client with `status` + `msg`
+#   action = "allow"  -> whitelist: forward immediately, skip signature scanning
+#   action = "log"    -> record an audit line and keep evaluating
+#
+# action = "rate_limit" -> throttle ONLY the matching traffic, per client IP,
+#   to `rps` (with optional `burst`, `ttl_secs`); over budget answers 429.
+# action = "score"      -> add `score` points; the request is blocked once the
+#   per-request total reaches [scoring] threshold (CRS-style anomaly scoring).
+# action = "incr"       -> bump a per-IP `counter` by `incr` (kept `ttl_secs`);
+#   read it later with field = "counter" (e.g. brute-force / scanner detection).
+#
+# phase = "request" (default) runs during inspection; phase = "response" runs
+# after the upstream replies and may match status / resp_header / resp_body
+# (block / log / incr only).
+#
+# Request fields  : method | path | query | uri | header(+name) | body | ip |
+#                   country | arg(+name) | arg_names | args_count |
+#                   cookie(+name) | cookie_names | counter(+name)
+# Response fields : status | resp_header(+name) | resp_body | ip | path | counter
+# Condition ops   : eq | ne | contains | starts_with | ends_with | regex |
+#                   in (values=[..]) | cidr (ip only) | gt | lt | ge | le |
+#                   detect_sqli | detect_xss (libinjection feature)
+# Per-condition   : transform = [..] (lowercase|uppercase|url_decode|compress_ws|
+#                   remove_nulls|trim), negate = true
+# Notes: matches are case-sensitive on raw values; use `regex` with `(?i)` for
+#        case-insensitive matching. `country` needs the geoip feature + DB.
+#        resp_body inspection buffers the upstream body (only for the
+#        Content-Types in [inspect] response_content_types, up to
+#        limits.max_inspect_body) — set it only when you need it.
+
+# Allow health checks straight through, before any inspection.
+[[rule]]
+id = "allow-healthz"
+action = "allow"
+when = [
+  { field = "path", op = "eq", value = "/healthz" },
+]
+
+# Lock the admin area to an internal network.
+[[rule]]
+id = "admin-internal-only"
+action = "block"
+status = 403
+msg = "admin area is internal-only"
+when = [
+  { field = "path", op = "starts_with", value = "/admin" },
+  { field = "ip",   op = "cidr",        value = "10.0.0.0/8" },  # change to your LAN; this blocks 10.x — invert per your needs
+]
+
+# Block known scanner user-agents.
+[[rule]]
+id = "block-scanners"
+action = "block"
+status = 403
+msg = "automated scanner blocked"
+when = [
+  { field = "header", name = "User-Agent", op = "regex", value = "(?i)(sqlmap|nikto|nmap|masscan|acunetix)" },
+]
+
+# Reject odd HTTP methods outright.
+[[rule]]
+id = "block-weird-methods"
+action = "block"
+status = 405
+msg = "method not allowed"
+when = [
+  { field = "method", op = "in", values = ["TRACE", "TRACK", "CONNECT"] },
+]
+
+# Throttle login attempts to 5/s per IP (small burst), independent of the
+# global rate limit — only requests to /login are affected.
+[[rule]]
+id = "throttle-login"
+action = "rate_limit"
+rps = 5
+burst = 10
+ttl_secs = 300
+when = [
+  { field = "path", op = "starts_with", value = "/login" },
+  { field = "method", op = "eq", value = "POST" },
+]
+
+# Example: just log (don't block) access to a sensitive path for review.
+[[rule]]
+id = "watch-export"
+action = "log"
+when = [
+  { field = "path", op = "contains", value = "/export" },
+]
+
+# Per-argument targeting also reaches into JSON and multipart bodies (the body
+# must be a buffered, inspectable Content-Type — see [inspect] content_types).
+# JSON is flattened to dotted paths: {"user":{"role":"x"}} -> arg "user.role";
+# arrays use indices: {"items":[{"id":1}]} -> arg "items.0.id".
+[[rule]]
+id = "json-priv-escalation"
+action = "block"
+status = 403
+msg = "role tampering blocked"
+when = [
+  { field = "arg", name = "user.role", op = "eq", value = "admin" },
+]
+
+# Multipart uploads: a file part's arg value is its filename — block dangerous
+# upload extensions by name.
+[[rule]]
+id = "block-dangerous-upload"
+action = "block"
+status = 403
+msg = "disallowed upload type"
+when = [
+  { field = "arg", name = "avatar", op = "regex", value = "(?i)\\.(php|phtml|jsp|exe|sh)$" },
+]
+
+# ── Response-phase rules (run after the upstream replies) ────────────────────
+
+# Mask upstream 5xx errors so stack traces / error pages never reach clients.
+[[rule]]
+id = "mask-5xx"
+phase = "response"
+action = "block"
+status = 502
+msg = "upstream error (masked)"
+when = [
+  { field = "status", op = "ge", value = "500" },
+]
+
+# Strip a server fingerprint leak (don't advertise the backend stack).
+[[rule]]
+id = "block-fingerprint"
+phase = "response"
+action = "block"
+status = 403
+msg = "server fingerprint leaked"
+when = [
+  { field = "resp_header", name = "X-Powered-By", op = "contains", value = "PHP" },
+]
+
+# Data-leak guard: block responses that appear to contain a 16-digit card
+# number (PAN). Requires buffering the response body — only inspectable
+# Content-Types within limits.max_inspect_body are buffered.
+[[rule]]
+id = "block-pan-leak"
+phase = "response"
+action = "block"
+status = 502
+msg = "response withheld (possible data leak)"
+when = [
+  { field = "resp_body", op = "regex", value = "\\b(?:\\d[ -]*?){16}\\b" },
+]

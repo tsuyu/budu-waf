@@ -1,0 +1,79 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/budu",
+    "crates/budu-common",
+    "crates/budu-config",
+    "crates/budu-proxy",
+    "crates/budu-pipeline",
+    "crates/budu-reputation",
+    "crates/budu-ratelimit",
+    "crates/budu-parser",
+    "crates/budu-signatures",
+    "crates/budu-rules",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.92"
+
+[workspace.dependencies]
+# internal
+budu-common     = { path = "crates/budu-common" }
+budu-config     = { path = "crates/budu-config" }
+budu-proxy      = { path = "crates/budu-proxy" }
+budu-pipeline   = { path = "crates/budu-pipeline" }
+budu-reputation = { path = "crates/budu-reputation" }
+budu-ratelimit  = { path = "crates/budu-ratelimit" }
+budu-parser     = { path = "crates/budu-parser" }
+budu-signatures = { path = "crates/budu-signatures" }
+budu-rules      = { path = "crates/budu-rules" }
+
+# http / async
+hyper          = { version = "1", features = ["http1", "server", "client"] }
+hyper-util     = { version = "0.1", features = ["tokio", "server-auto", "client-legacy"] }
+http-body-util = "0.1"
+bytes          = "1"
+tokio          = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "signal"] }
+tokio-util     = { version = "0.7", features = ["rt"] }
+arc-swap       = "1"
+
+# config / serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml  = "0.8"
+
+# cli
+clap = { version = "4", features = ["derive"] }
+
+# net types
+ipnet = { version = "2", features = ["serde"] }
+
+# rate limiting
+governor = "0.6"
+moka     = { version = "0.12", features = ["sync"] }
+
+# matching (regex unicode off: we match HTTP bytes, not unicode text)
+aho-corasick = "1"
+regex        = { version = "1", default-features = false, features = ["std", "perf"] }
+
+# geoip (optional — only built with the `geoip` feature)
+maxminddb = "0.28"
+
+# remote blocklist feeds (optional — only with the `remote-blocklist` feature)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# errors / logging
+thiserror          = "1"
+anyhow             = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+strip         = true
+opt-level     = 3
+# panic stays on UNWIND — never "abort" for an inline WAF

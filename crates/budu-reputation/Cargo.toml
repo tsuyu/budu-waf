@@ -1,0 +1,21 @@
+[package]
+name = "budu-reputation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+geoip = ["dep:maxminddb"]
+remote-blocklist = ["dep:reqwest"]
+
+[dependencies]
+budu-common = { workspace = true }
+budu-config = { workspace = true }
+arc-swap    = { workspace = true }
+ipnet       = { workspace = true }
+http        = "1"
+tracing     = { workspace = true }
+anyhow      = { workspace = true }
+maxminddb   = { workspace = true, optional = true }
+reqwest     = { workspace = true, optional = true }
