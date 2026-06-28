@@ -18,14 +18,17 @@
 # (block / log / incr only).
 #
 # Request fields  : method | path | query | uri | header(+name) | body | ip |
-#                   country | arg(+name) | arg_names | args_count |
-#                   cookie(+name) | cookie_names | counter(+name)
+#                   country | arg(+name) | arg_names | args_count | args |
+#                   headers | header_names | cookie(+name) | cookie_names |
+#                   cookies | counter(+name) | time | day
 # Response fields : status | resp_header(+name) | resp_body | ip | path | counter
 # Condition ops   : eq | ne | contains | starts_with | ends_with | regex |
 #                   in (values=[..]) | cidr (ip only) | gt | lt | ge | le |
-#                   detect_sqli | detect_xss (libinjection feature)
+#                   detect_sqli | detect_xss (libinjection feature) |
+#                   time_between (time only; value="HH:MM-HH:MM") |
+#                   day_of_week (day only; value="Mon-Fri" or "Sat,Sun")
 # Per-condition   : transform = [..] (lowercase|uppercase|url_decode|compress_ws|
-#                   remove_nulls|trim), negate = true
+#                   remove_nulls|trim), negate = true, tz = "+HH:MM" (time_between)
 # Notes: matches are case-sensitive on raw values; use `regex` with `(?i)` for
 #        case-insensitive matching. `country` needs the geoip feature + DB.
 #        resp_body inspection buffers the upstream body (only for the
@@ -151,4 +154,49 @@ status = 502
 msg = "response withheld (possible data leak)"
 when = [
   { field = "resp_body", op = "regex", value = "\\b(?:\\d[ -]*?){16}\\b" },
+]
+
+# Time-window access control: allow the app only between 08:00 and 23:59; block
+# outside that window. The timezone comes from [server] timezone (here +08:00) —
+# add a per-rule `tz = "..."` to override it. `time_between` matches when the
+# current time is INSIDE the window, so `negate = true` blocks when OUTSIDE it.
+# For an overnight window use start > end, e.g. value = "22:00-06:00".
+[[rule]]
+id = "business-hours-only"
+action = "block"
+status = 403
+msg = "service available 08:00-23:59 only"
+when = [
+  { field = "time", op = "time_between", value = "08:00-23:59", negate = true },
+]
+
+# Day-of-week control. `day_of_week` value is a comma list of days and/or
+# inclusive ranges (Sun..Sat, case-insensitive); ranges wrap (e.g. "Fri-Mon").
+# It inherits [server] timezone too. Block the whole weekend:
+[[rule]]
+id = "weekends-closed"
+action = "block"
+status = 403
+msg = "closed on weekends"
+when = [
+  { field = "day", op = "day_of_week", value = "Sat,Sun" },
+]
+
+# Combine day + time for "open Mon-Fri, 09:00-18:00 only" — express it as the
+# two ways in can be OUTSIDE the window (weekend, OR off-hours), each its own
+# block rule (conditions within a rule are AND-ed):
+[[rule]]
+id = "closed-weekends-2"
+action = "block"
+status = 403
+msg = "open Mon-Fri 09:00-18:00"
+when = [ { field = "day", op = "day_of_week", value = "Mon-Fri", negate = true } ]
+[[rule]]
+id = "closed-offhours"
+action = "block"
+status = 403
+msg = "open Mon-Fri 09:00-18:00"
+when = [
+  { field = "day",  op = "day_of_week", value = "Mon-Fri" },
+  { field = "time", op = "time_between", value = "09:00-18:00", negate = true },
 ]

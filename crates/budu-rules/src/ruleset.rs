@@ -109,6 +109,9 @@ struct CondDef {
     /// (e.g. `["url_decode", "lowercase"]`).
     #[serde(default)]
     transform: Vec<String>,
+    /// Timezone offset for `op = "time_between"`, e.g. `"+08:00"` (default UTC).
+    #[serde(default)]
+    tz: String,
 }
 
 // ── Compiled form ──────────────────────────────────────────────────────────
@@ -150,6 +153,11 @@ enum Field {
     HeaderNames,
     /// All cookie **values**. Multi-valued.
     Cookies,
+    /// Current wall-clock time of day (request phase). Use with
+    /// `op = "time_between"` for business-hours / maintenance-window rules.
+    Time,
+    /// Current day of week (request phase). Use with `op = "day_of_week"`.
+    Day,
 }
 
 enum Op {
@@ -171,6 +179,13 @@ enum Op {
     DetectSqli,
     #[cfg(feature = "libinjection")]
     DetectXss,
+    /// Local time-of-day within `[start, end]` (minutes since midnight); an
+    /// `start > end` window wraps past midnight. `offset_min` shifts UTC to the
+    /// rule's timezone.
+    TimeBetween { start: u16, end: u16, offset_min: i16 },
+    /// Current local day-of-week is in `mask` (bit 0 = Sunday … bit 6 = Saturday).
+    /// `offset_min` shifts UTC to the rule's timezone (can change the day).
+    DayOfWeek { mask: u8, offset_min: i16 },
 }
 
 #[derive(Clone, Copy)]
@@ -250,8 +265,14 @@ impl RuleSet {
     }
 
     /// Load from a TOML file; an empty path yields an empty (no-op) set. The
-    /// `scoring` config supplies the anomaly threshold / response.
-    pub fn load(path: &str, scoring: &budu_config::ScoringConfig) -> Result<Self, RuleError> {
+    /// `scoring` config supplies the anomaly threshold / response; `default_tz`
+    /// is the server-wide timezone offset (minutes) applied to `time_between`
+    /// rules that don't set their own `tz`.
+    pub fn load(
+        path: &str,
+        scoring: &budu_config::ScoringConfig,
+        default_tz: i16,
+    ) -> Result<Self, RuleError> {
         if path.trim().is_empty() {
             let mut rs = Self::empty();
             rs.apply_scoring(scoring)?;
@@ -261,7 +282,7 @@ impl RuleSet {
             std::fs::read_to_string(path).map_err(|e| RuleError::Read(format!("{path}: {e}")))?;
         let file: RuleFile =
             toml::from_str(&text).map_err(|e| RuleError::Parse(e.to_string()))?;
-        Self::compile(file.rule, scoring)
+        Self::compile_with_tz(file.rule, scoring, default_tz)
     }
 
     fn apply_scoring(&mut self, scoring: &budu_config::ScoringConfig) -> Result<(), RuleError> {
@@ -275,14 +296,25 @@ impl RuleSet {
         Ok(())
     }
 
+    /// Compile rules with the default (UTC) timezone for `time_between`. Used by
+    /// tests; the runtime path goes through [`load`](Self::load).
+    #[cfg(test)]
     fn compile(defs: Vec<RuleDef>, scoring: &budu_config::ScoringConfig) -> Result<Self, RuleError> {
+        Self::compile_with_tz(defs, scoring, 0)
+    }
+
+    fn compile_with_tz(
+        defs: Vec<RuleDef>,
+        scoring: &budu_config::ScoringConfig,
+        default_tz: i16,
+    ) -> Result<Self, RuleError> {
         let mut rules = Vec::new();
         let mut response_rules = Vec::new();
         for def in defs {
             let conds = def
                 .when
                 .iter()
-                .map(|c| compile_cond(&def.id, c))
+                .map(|c| compile_cond(&def.id, c, default_tz))
                 .collect::<Result<Vec<_>, _>>()?;
             if conds.is_empty() {
                 return Err(RuleError::Invalid {
@@ -552,7 +584,7 @@ impl RuleSet {
     }
 }
 
-fn compile_cond(rule: &str, c: &CondDef) -> Result<CompiledCond, RuleError> {
+fn compile_cond(rule: &str, c: &CondDef, default_tz: i16) -> Result<CompiledCond, RuleError> {
     let invalid = |msg: String| RuleError::Invalid {
         rule: rule.to_string(),
         msg,
@@ -605,7 +637,20 @@ fn compile_cond(rule: &str, c: &CondDef) -> Result<CompiledCond, RuleError> {
             Field::Cookie(c.name.clone())
         }
         "cookie_names" => Field::CookieNames,
+        "time" => Field::Time,
+        "day" => Field::Day,
         other => return Err(invalid(format!("unknown field {other:?}"))),
+    };
+
+    // Per-rule `tz` overrides the server default (`default_tz`); shared by the
+    // time-of-day and day-of-week operators.
+    let resolve_tz = || -> Result<i16, RuleError> {
+        if c.tz.trim().is_empty() {
+            Ok(default_tz)
+        } else {
+            parse_tz_offset(&c.tz)
+                .ok_or_else(|| invalid(format!("bad tz {:?}; expected e.g. \"+08:00\"", c.tz)))
+        }
     };
 
     let num = |s: &str| -> Result<i64, RuleError> {
@@ -649,6 +694,41 @@ fn compile_cond(rule: &str, c: &CondDef) -> Result<CompiledCond, RuleError> {
         "lt" => Op::Lt(num(&c.value)?),
         "ge" => Op::Ge(num(&c.value)?),
         "le" => Op::Le(num(&c.value)?),
+        "time_between" => {
+            if !matches!(field, Field::Time) {
+                return Err(invalid(
+                    "op = \"time_between\" only applies to field = \"time\"".into(),
+                ));
+            }
+            let (start, end) = parse_time_window(&c.value).ok_or_else(|| {
+                invalid(format!(
+                    "bad time window {:?}; expected \"HH:MM-HH:MM\"",
+                    c.value
+                ))
+            })?;
+            Op::TimeBetween {
+                start,
+                end,
+                offset_min: resolve_tz()?,
+            }
+        }
+        "day_of_week" => {
+            if !matches!(field, Field::Day) {
+                return Err(invalid(
+                    "op = \"day_of_week\" only applies to field = \"day\"".into(),
+                ));
+            }
+            let mask = parse_day_mask(&c.value).ok_or_else(|| {
+                invalid(format!(
+                    "bad day spec {:?}; expected e.g. \"Mon-Fri\" or \"Sat,Sun\"",
+                    c.value
+                ))
+            })?;
+            Op::DayOfWeek {
+                mask,
+                offset_min: resolve_tz()?,
+            }
+        }
         #[cfg(feature = "libinjection")]
         "detect_sqli" => Op::DetectSqli,
         #[cfg(feature = "libinjection")]
@@ -661,6 +741,20 @@ fn compile_cond(rule: &str, c: &CondDef) -> Result<CompiledCond, RuleError> {
         }
         other => return Err(invalid(format!("unknown op {other:?}"))),
     };
+
+    match field {
+        Field::Time if !matches!(op, Op::TimeBetween { .. }) => {
+            return Err(invalid(
+                "field = \"time\" only supports op = \"time_between\"".into(),
+            ))
+        }
+        Field::Day if !matches!(op, Op::DayOfWeek { .. }) => {
+            return Err(invalid(
+                "field = \"day\" only supports op = \"day_of_week\"".into(),
+            ))
+        }
+        _ => {}
+    }
 
     let transforms = c
         .transform
@@ -792,7 +886,142 @@ fn eval_op(op: &Op, value: &str) -> bool {
         #[cfg(feature = "libinjection")]
         Op::DetectXss => libinjectionrs::detect_xss(value.as_bytes()).is_injection(),
         Op::Cidr(_) => false, // handled before transforms
+        Op::TimeBetween {
+            start,
+            end,
+            offset_min,
+        } => value
+            .trim()
+            .parse::<u16>()
+            .is_ok_and(|now_utc| in_window(now_utc, *start, *end, *offset_min)),
+        Op::DayOfWeek { mask, offset_min } => value
+            .trim()
+            .parse::<i64>()
+            .is_ok_and(|epoch_min| mask & (1 << weekday(epoch_min, *offset_min)) != 0),
     }
+}
+
+/// Minutes since the UNIX epoch (UTC) right now.
+fn utc_epoch_minutes() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() / 60) as i64)
+        .unwrap_or(0)
+}
+
+/// Local day of week for `epoch_min` shifted by `offset_min`: bit index
+/// 0 = Sunday … 6 = Saturday (the UNIX epoch, 1970-01-01, was a Thursday).
+fn weekday(epoch_min: i64, offset_min: i16) -> u8 {
+    let days = (epoch_min + offset_min as i64).div_euclid(1440);
+    ((days + 4).rem_euclid(7)) as u8
+}
+
+/// Parse a day spec into a 7-bit mask (bit 0 = Sunday). Accepts comma-separated
+/// day names and inclusive ranges that wrap, e.g. `"Mon-Fri"`, `"Sat,Sun"`,
+/// `"Mon,Wed,Fri"`, `"Fri-Mon"`.
+fn parse_day_mask(s: &str) -> Option<u8> {
+    let mut mask = 0u8;
+    for tok in s.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        match tok.split_once('-') {
+            Some((a, b)) => {
+                let (a, b) = (parse_day_name(a)?, parse_day_name(b)?);
+                let mut d = a;
+                loop {
+                    mask |= 1 << d;
+                    if d == b {
+                        break;
+                    }
+                    d = (d + 1) % 7;
+                }
+            }
+            None => mask |= 1 << parse_day_name(tok)?,
+        }
+    }
+    (mask != 0).then_some(mask)
+}
+
+/// Map a weekday name to a bit index (Sunday = 0 … Saturday = 6).
+fn parse_day_name(s: &str) -> Option<u8> {
+    Some(match s.trim().to_ascii_lowercase().as_str() {
+        "sun" | "sunday" => 0,
+        "mon" | "monday" => 1,
+        "tue" | "tues" | "tuesday" => 2,
+        "wed" | "weds" | "wednesday" => 3,
+        "thu" | "thur" | "thurs" | "thursday" => 4,
+        "fri" | "friday" => 5,
+        "sat" | "saturday" => 6,
+        _ => return None,
+    })
+}
+
+/// Minutes since midnight (UTC) right now. The UNIX epoch is UTC-midnight
+/// aligned, so `secs % 86400` is the UTC time of day.
+fn utc_minutes_now() -> u16 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    ((secs % 86_400) / 60) as u16
+}
+
+/// Is `now_utc` (minutes since UTC midnight), shifted by `offset_min`, inside the
+/// `[start, end]` window? A `start > end` window wraps past midnight
+/// (e.g. `22:00-06:00`).
+fn in_window(now_utc: u16, start: u16, end: u16, offset_min: i16) -> bool {
+    let local = (now_utc as i32 + offset_min as i32).rem_euclid(1440) as u16;
+    if start <= end {
+        local >= start && local <= end
+    } else {
+        local >= start || local <= end
+    }
+}
+
+/// Parse `"HH:MM-HH:MM"` into start/end minutes. Accepts `.` as well as `:`
+/// between hours and minutes (so `"23.59"` works).
+fn parse_time_window(s: &str) -> Option<(u16, u16)> {
+    let (a, b) = s.split_once('-')?;
+    Some((parse_hhmm(a)?, parse_hhmm(b)?))
+}
+
+fn parse_hhmm(s: &str) -> Option<u16> {
+    let s = s.trim();
+    let (h, m) = s.split_once(':').or_else(|| s.split_once('.'))?;
+    let h: u16 = h.trim().parse().ok()?;
+    let m: u16 = m.trim().parse().ok()?;
+    (h <= 23 && m <= 59).then_some(h * 60 + m)
+}
+
+/// Parse a timezone offset like `"+08:00"`, `"-05:30"`, `"+8"`, `"UTC+8"`, or
+/// `""` (→ UTC). Returns the signed offset in minutes. Public so the binary can
+/// validate `[server] timezone` and pass the offset into rule compilation.
+pub fn parse_tz_offset(s: &str) -> Option<i16> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Some(0);
+    }
+    let s = s
+        .strip_prefix("UTC")
+        .or_else(|| s.strip_prefix("utc"))
+        .unwrap_or(s)
+        .trim();
+    if s.is_empty() {
+        return Some(0);
+    }
+    let (sign, rest) = match s.strip_prefix('-') {
+        Some(r) => (-1i16, r),
+        None => (1i16, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let (h, m) = match rest.split_once(':') {
+        Some((h, m)) => (h, m),
+        None => (rest, "0"),
+    };
+    let h: i16 = h.trim().parse().ok()?;
+    let m: i16 = m.trim().parse().ok()?;
+    (h <= 14 && m <= 59).then_some(sign * (h * 60 + m))
 }
 
 /// Candidate value(s) for a field. Scalar fields give 0 or 1; `arg`/`cookie`/
@@ -867,6 +1096,12 @@ fn collect_candidates<'a>(
             .into_iter()
             .map(|(_, v)| Cow::Owned(v))
             .collect(),
+        // Time-of-day candidate is the current UTC minutes; the window's tz
+        // offset is applied in `eval_op`.
+        Field::Time => vec![Cow::Owned(utc_minutes_now().to_string())],
+        // Day-of-week candidate is the current UTC epoch-minute; the tz offset
+        // (which can change the day) is applied in `eval_op`.
+        Field::Day => vec![Cow::Owned(utc_epoch_minutes().to_string())],
         // Response-only fields never appear in request-phase rules (compile rejects).
         Field::Status | Field::RespHeader(_) | Field::RespBody => Vec::new(),
     }
@@ -1493,6 +1728,170 @@ when = [ { field = "arg", name = "avatar", op = "ends_with", value = ".php" } ]
             rs.evaluate(&ctx_body(&m, "/upload", &h, "10.0.0.1", upload)),
             Some(Outcome::Block { .. })
         ));
+    }
+
+    #[test]
+    fn time_window_parsing_and_membership() {
+        // 08:00-23:59 = minutes 480..=1439
+        assert_eq!(parse_time_window("08:00-23:59"), Some((480, 1439)));
+        // dot separator is accepted too
+        assert_eq!(parse_time_window("8:00-23.59"), Some((480, 1439)));
+        assert!(parse_time_window("24:00-08:00").is_none()); // 24 invalid
+        assert!(parse_time_window("08:00").is_none()); // no range
+
+        // daytime window, UTC
+        assert!(in_window(600, 480, 1439, 0)); // 10:00 inside
+        assert!(!in_window(420, 480, 1439, 0)); // 07:00 outside
+        assert!(in_window(1439, 480, 1439, 0)); // 23:59 boundary inside
+
+        // tz offset: 02:00 UTC + 08:00 = 10:00 local → inside 08:00-23:59
+        assert!(in_window(120, 480, 1439, 8 * 60));
+        // 22:00 UTC + 08:00 = 06:00 local → outside 08:00-23:59
+        assert!(!in_window(1320, 480, 1439, 8 * 60));
+
+        // overnight window 22:00-06:00 wraps midnight
+        assert!(in_window(1380, 1320, 360, 0)); // 23:00 inside
+        assert!(in_window(120, 1320, 360, 0)); // 02:00 inside
+        assert!(!in_window(720, 1320, 360, 0)); // 12:00 outside
+    }
+
+    #[test]
+    fn tz_offset_parsing() {
+        assert_eq!(parse_tz_offset(""), Some(0));
+        assert_eq!(parse_tz_offset("+08:00"), Some(480));
+        assert_eq!(parse_tz_offset("-05:30"), Some(-330));
+        assert_eq!(parse_tz_offset("+8"), Some(480));
+        assert_eq!(parse_tz_offset("UTC+8"), Some(480));
+        assert!(parse_tz_offset("+15:00").is_none()); // > 14h
+        assert!(parse_tz_offset("noon").is_none());
+    }
+
+    #[test]
+    fn time_rule_compiles_and_rejects_bad_combos() {
+        // valid business-hours rule
+        let rs = compile(
+            r#"
+[[rule]]
+id = "office-hours"
+action = "block"
+status = 403
+when = [ { field = "time", op = "time_between", value = "08:00-23:59", tz = "+08:00", negate = true } ]
+"#,
+        );
+        assert_eq!(rs.len(), 1);
+
+        // time_between on a non-time field is rejected
+        let bad: RuleFile = toml::from_str(
+            "[[rule]]\nid='x'\nwhen=[{field='path',op='time_between',value='08:00-23:59'}]\n",
+        )
+        .expect("parses");
+        assert!(RuleSet::compile(bad.rule, &budu_config::ScoringConfig::default()).is_err());
+
+        // time field with a non-time op is rejected
+        let bad2: RuleFile =
+            toml::from_str("[[rule]]\nid='x'\nwhen=[{field='time',op='eq',value='600'}]\n")
+                .expect("parses");
+        assert!(RuleSet::compile(bad2.rule, &budu_config::ScoringConfig::default()).is_err());
+
+        // malformed window is rejected
+        let bad3: RuleFile = toml::from_str(
+            "[[rule]]\nid='x'\nwhen=[{field='time',op='time_between',value='notatime'}]\n",
+        )
+        .expect("parses");
+        assert!(RuleSet::compile(bad3.rule, &budu_config::ScoringConfig::default()).is_err());
+    }
+
+    #[test]
+    fn day_mask_parsing_and_weekday() {
+        // Sun=0 .. Sat=6
+        assert_eq!(parse_day_name("Mon"), Some(1));
+        assert_eq!(parse_day_name("sunday"), Some(0));
+        assert!(parse_day_name("funday").is_none());
+
+        // Mon-Fri = bits 1..5
+        assert_eq!(parse_day_mask("Mon-Fri"), Some(0b0111110));
+        // set
+        assert_eq!(parse_day_mask("Sat,Sun"), Some(0b1000001));
+        // wrap-around range Fri-Mon = Fri,Sat,Sun,Mon
+        assert_eq!(parse_day_mask("Fri-Mon"), Some(0b1100011));
+        // single day
+        assert_eq!(parse_day_mask("Wed"), Some(0b0001000));
+        assert!(parse_day_mask("nope").is_none());
+
+        // 2021-01-01 00:00 UTC was a Friday (=5). epoch minutes:
+        let epoch_min = 1_609_459_200i64 / 60;
+        assert_eq!(weekday(epoch_min, 0), 5);
+        // +08:00 still Friday at midday-ish; -09:00 rolls back to Thursday (=4)
+        assert_eq!(weekday(epoch_min, 8 * 60), 5);
+        assert_eq!(weekday(epoch_min, -9 * 60), 4);
+    }
+
+    #[test]
+    fn day_rule_compiles_and_inherits_tz() {
+        let rs = compile(
+            r#"
+[[rule]]
+id = "weekends-closed"
+action = "block"
+status = 403
+when = [ { field = "day", op = "day_of_week", value = "Sat,Sun" } ]
+"#,
+        );
+        assert_eq!(rs.len(), 1);
+
+        // server default tz is baked into the day op when the cond omits tz
+        let file: RuleFile = toml::from_str(
+            "[[rule]]\nid='d'\naction='block'\nwhen=[{field='day',op='day_of_week',value='Mon-Fri'}]\n",
+        )
+        .unwrap();
+        let rs2 =
+            RuleSet::compile_with_tz(file.rule, &budu_config::ScoringConfig::default(), 8 * 60)
+                .unwrap();
+        match &rs2.rules[0].conds[0].op {
+            Op::DayOfWeek { mask, offset_min } => {
+                assert_eq!(*mask, 0b0111110);
+                assert_eq!(*offset_min, 480);
+            }
+            _ => panic!("expected DayOfWeek"),
+        }
+
+        // mismatched field/op combos are rejected
+        let bad: RuleFile = toml::from_str(
+            "[[rule]]\nid='x'\nwhen=[{field='path',op='day_of_week',value='Mon'}]\n",
+        )
+        .unwrap();
+        assert!(RuleSet::compile(bad.rule, &budu_config::ScoringConfig::default()).is_err());
+        let bad2: RuleFile =
+            toml::from_str("[[rule]]\nid='x'\nwhen=[{field='day',op='eq',value='Mon'}]\n").unwrap();
+        assert!(RuleSet::compile(bad2.rule, &budu_config::ScoringConfig::default()).is_err());
+    }
+
+    #[test]
+    fn default_tz_applies_and_per_rule_overrides() {
+        let toml = "[[rule]]\nid='h'\naction='block'\nwhen=[{field='time',op='time_between',value='08:00-17:00'}]\n";
+        let file: RuleFile = toml::from_str(toml).unwrap();
+        // server default +08:00 is baked in when the condition omits tz
+        let rs =
+            RuleSet::compile_with_tz(file.rule, &budu_config::ScoringConfig::default(), 8 * 60)
+                .unwrap();
+        match &rs.rules[0].conds[0].op {
+            Op::TimeBetween { start, end, offset_min } => {
+                assert_eq!((*start, *end), (480, 1020));
+                assert_eq!(*offset_min, 480);
+            }
+            _ => panic!("expected TimeBetween"),
+        }
+
+        // a per-rule tz overrides the server default
+        let toml2 = "[[rule]]\nid='h'\naction='block'\nwhen=[{field='time',op='time_between',value='08:00-17:00',tz='-05:00'}]\n";
+        let file2: RuleFile = toml::from_str(toml2).unwrap();
+        let rs2 =
+            RuleSet::compile_with_tz(file2.rule, &budu_config::ScoringConfig::default(), 8 * 60)
+                .unwrap();
+        match &rs2.rules[0].conds[0].op {
+            Op::TimeBetween { offset_min, .. } => assert_eq!(*offset_min, -300),
+            _ => panic!("expected TimeBetween"),
+        }
     }
 
     #[test]

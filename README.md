@@ -41,7 +41,8 @@ client ─────────► edge proxy ─────────► 
   with per-condition **transforms** (url_decode, lowercase, …), **negation**,
   numeric comparisons, optional **libinjection** SQLi/XSS operators, per-arg/cookie
   targeting (reaching into **JSON & multipart** bodies), **CRS-style anomaly
-  scoring**, **stateful per-IP counters**, and
+  scoring**, **stateful per-IP counters**, **time- & day-of-week rules**
+  (business-hours / weekday-only / maintenance-window access control), and
   **response-phase rules** (match on upstream status, headers, *and body* — e.g.
   mask 5xx errors or withhold responses that leak sensitive data).
 - **CRS import**: convert ModSecurity / OWASP Core Rule Set `SecRule` files into

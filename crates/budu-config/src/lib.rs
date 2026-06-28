@@ -65,6 +65,10 @@ pub struct ServerConfig {
     /// Guards against a slow/hung backend tying up connections indefinitely.
     #[serde(default = "default_upstream_timeout")]
     pub upstream_timeout_secs: u64,
+    /// Default timezone for `time_between` rules that don't set their own `tz`,
+    /// e.g. `"+08:00"`. Empty = UTC. A per-rule `tz` always overrides this.
+    #[serde(default)]
+    pub timezone: String,
 }
 
 fn default_upstream_timeout() -> u64 {

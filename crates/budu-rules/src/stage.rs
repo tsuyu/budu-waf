@@ -18,8 +18,11 @@ pub type SharedRules = Arc<ArcSwap<RuleSet>>;
 pub fn shared_from_path(
     path: &str,
     scoring: &budu_config::ScoringConfig,
+    default_tz: i16,
 ) -> Result<SharedRules, crate::RuleError> {
-    Ok(Arc::new(ArcSwap::from_pointee(RuleSet::load(path, scoring)?)))
+    Ok(Arc::new(ArcSwap::from_pointee(RuleSet::load(
+        path, scoring, default_tz,
+    )?)))
 }
 
 pub struct RulesStage {
@@ -44,8 +47,9 @@ impl RulesStage {
     pub fn from_path(
         path: &str,
         scoring: &budu_config::ScoringConfig,
+        default_tz: i16,
     ) -> Result<Self, crate::RuleError> {
-        Ok(Self::new(shared_from_path(path, scoring)?))
+        Ok(Self::new(shared_from_path(path, scoring, default_tz)?))
     }
 
     /// Handle for the supervisor to hot-swap the rule set.

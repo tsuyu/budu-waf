@@ -14,6 +14,14 @@ use http::StatusCode;
 mod sanity;
 pub use sanity::SanityStage;
 
+/// Parse the server-wide default timezone (`[server] timezone`) into a minutes
+/// offset for `time_between` rules. Empty = UTC.
+fn parse_default_tz(timezone: &str) -> anyhow::Result<i16> {
+    budu_rules::parse_tz_offset(timezone).ok_or_else(|| {
+        anyhow::anyhow!("invalid [server] timezone {timezone:?}; expected e.g. \"+08:00\"")
+    })
+}
+
 /// An ordered pipeline split around the body-gate (§8): `early` stages run on
 /// the head alone (cheapest-first), then the proxy may buffer the body, then
 /// `late` stages (signatures) run with the body available. The fail policy is
@@ -45,7 +53,12 @@ impl Pipeline {
         let signatures = budu_signatures::SignatureStage::from_path(&cfg.paths.signatures)?;
         let signatures_handle = signatures.handle();
 
-        let rules = Arc::new(budu_rules::RulesStage::from_path(&cfg.paths.rules, &cfg.scoring)?);
+        let default_tz = parse_default_tz(&cfg.server.timezone)?;
+        let rules = Arc::new(budu_rules::RulesStage::from_path(
+            &cfg.paths.rules,
+            &cfg.scoring,
+            default_tz,
+        )?);
         let rules_handle = rules.handle();
         let rules_log_hits = rules.log_hits_handle();
         let rules_counters = rules.counters_handle();
@@ -98,7 +111,7 @@ impl Pipeline {
     /// Construct from an explicit (early-only) stage list for tests.
     pub fn new(stages: Vec<Box<dyn Stage>>, on_error: OnError) -> Self {
         let rules = Arc::new(
-            budu_rules::RulesStage::from_path("", &budu_config::ScoringConfig::default())
+            budu_rules::RulesStage::from_path("", &budu_config::ScoringConfig::default(), 0)
                 .expect("empty rule set"),
         );
         let allowlist = budu_reputation::shared_allowlist(&budu_config::ReputationConfig::default())
@@ -220,7 +233,8 @@ impl Reloadable {
         // Compile both before swapping either, so a broken file leaves the
         // running config untouched.
         let new_sigs = budu_signatures::SignatureDb::load(&cfg.paths.signatures)?;
-        let new_rules = budu_rules::RuleSet::load(&cfg.paths.rules, &cfg.scoring)?;
+        let default_tz = parse_default_tz(&cfg.server.timezone)?;
+        let new_rules = budu_rules::RuleSet::load(&cfg.paths.rules, &cfg.scoring, default_tz)?;
         // Allowlist is local-only (inline + file), so rebuild it synchronously here.
         let new_allow = budu_reputation::build_allowlist(&cfg.reputation)?;
         self.signatures.store(Arc::new(new_sigs));

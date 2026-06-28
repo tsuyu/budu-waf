@@ -26,6 +26,7 @@ All other sections have defaults and may be omitted.
 | `on_error` | `closed` \| `open` | `closed` | Behaviour when an inspection stage **panics**: fail-closed (deny, `500`) or fail-open (skip the stage). |
 | `enforcement` | `block` \| `detect` | `block` | `detect` = **detection-only**: evaluate every layer and log/meter what it *would* block, but forward the request anyway. Resource limits (rate-limit `429`, body-size `413`) stay enforced in both modes. |
 | `upstream_timeout_secs` | integer > 0 | `30` | Max wait for the backend before answering `504`. |
+| `timezone` | offset string | `""` (UTC) | Default timezone for `time_between` rules, e.g. `"+08:00"`, `"-05:30"`. A per-rule `tz` overrides it. Invalid values are rejected at startup / `check`. |
 
 The `listen` address is read once at startup; changing it needs a restart.
 `upstream`, `limits`, `inspect`, and the rule/signature/blocklist sources all

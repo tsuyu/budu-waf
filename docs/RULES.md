@@ -67,6 +67,8 @@ when = [                         # 1+ conditions, ALL must match (logical AND)
 | `headers` | **All** request header values, multi-valued. |
 | `header_names` | The set of request header names, multi-valued. |
 | `cookies` | **All** cookie values, multi-valued. |
+| `time` | Current wall-clock time of day — use only with `op = "time_between"` (see [Time-window rules](#time-window-rules-time--time_between)). |
+| `day` | Current day of week — use only with `op = "day_of_week"` (see [Time-window rules](#time-window-rules-time--time_between)). |
 
 > Targeted fields are the precision tool: matching `arg name="redirect"` only
 > inspects that parameter, not the whole query — far fewer false positives than a
@@ -105,6 +107,8 @@ By default values are matched against the **raw** request (case-sensitive). Use
 | `gt` `lt` `ge` `le` | numeric compare | field parsed as an integer; non-numeric ⇒ no match. E.g. `Content-Length > N` |
 | `detect_sqli` | libinjection SQLi detection | **requires `--features libinjection`**; `value` ignored |
 | `detect_xss` | libinjection XSS detection | **requires `--features libinjection`**; `value` ignored |
+| `time_between` | current time-of-day within a window | **`field` must be `time`**; `value = "HH:MM-HH:MM"`, optional `tz`. See below. |
+| `day_of_week` | current day within a set/range of weekdays | **`field` must be `day`**; `value = "Mon-Fri"` / `"Sat,Sun"`, optional `tz`. See below. |
 
 > A header name must be given with `name`: `{ field = "header", name = "User-Agent", op = "contains", value = "curl" }`.
 
@@ -261,6 +265,75 @@ when = [ { field = "counter", name = "login", op = "gt", value = "10" } ]
 > Counters are keyed per client IP and are approximate under heavy concurrency
 > (a rare lost increment) — fine for security thresholds. `budu_counters` on
 > `/metrics` shows the number of live counter entries.
+
+### Time-window rules (`time` + `time_between`)
+
+`op = "time_between"` matches when the **current time of day** falls inside a
+window. Use it for business-hours access, maintenance windows, or
+time-restricted endpoints.
+
+- `value = "HH:MM-HH:MM"` — the window (24-hour clock; `.` also works as the
+  separator, so `23.59` is accepted). A `start > end` window **wraps past
+  midnight** (e.g. `"22:00-06:00"` = 22:00 through 06:00 next day).
+- `tz = "+HH:MM"` — the timezone the window is expressed in (e.g. `"+08:00"`,
+  `"-05:30"`). The server clock is read in UTC and shifted by this offset. If
+  omitted, the per-rule `tz` falls back to the global **`[server] timezone`**
+  (which itself defaults to UTC) — so set the timezone once in config instead of
+  on every rule, and override per-rule only when needed.
+- The op matches when the time is **inside** the window, so to **block outside**
+  the window add `negate = true`.
+
+```toml
+# Allow the app only 08:00–23:59 (tz from [server] timezone); block outside it.
+[[rule]]
+id = "business-hours-only"
+action = "block"
+status = 403
+msg = "service available 08:00-23:59 only"
+when = [
+  { field = "time", op = "time_between", value = "08:00-23:59", negate = true },
+]
+```
+
+### Day-of-week (`day` + `day_of_week`)
+
+`op = "day_of_week"` matches when the current **day of week** is in a set/range.
+`value` is a comma-separated list of day names and/or **inclusive ranges**
+(`Sun`,`Mon`,…,`Sat`, case-insensitive; full names work too). Ranges **wrap**,
+so `"Fri-Mon"` = Fri, Sat, Sun, Mon. It uses the same timezone resolution as
+`time_between` (per-rule `tz`, else `[server] timezone`).
+
+```toml
+# Closed on weekends
+[[rule]]
+id = "weekends-closed"
+action = "block"
+status = 403
+when = [ { field = "day", op = "day_of_week", value = "Sat,Sun" } ]
+```
+
+**Combining day + time.** Conditions inside one rule are AND-ed, so to enforce
+"open **Mon–Fri 09:00–18:00**" you block the two ways a request can be *outside*
+that window — on a weekend, **or** off-hours on a weekday — with two rules:
+
+```toml
+[[rule]]                       # any weekend → closed
+id = "closed-weekends"
+action = "block"
+when = [ { field = "day", op = "day_of_week", value = "Mon-Fri", negate = true } ]
+
+[[rule]]                       # weekday but outside 09:00–18:00 → closed
+id = "closed-offhours"
+action = "block"
+when = [
+  { field = "day",  op = "day_of_week", value = "Mon-Fri" },
+  { field = "time", op = "time_between", value = "09:00-18:00", negate = true },
+]
+```
+
+To **rate-limit** rather than block off-hours, use `action = "rate_limit"` on the
+same conditions. The check is on the **server's** clock shifted by `tz` — set the
+timezone to match the audience you're gating.
 
 ## Examples
 

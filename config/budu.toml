@@ -6,6 +6,7 @@ trusted_peer     = "127.0.0.1/32"              # only front Apache
 on_error         = "closed"                    # closed | open
 enforcement      = "block"                     # block | detect (detect = log-only, forward anyway)
 upstream_timeout_secs = 30                     # give up on a hung backend → 504
+timezone         = "+08:00"                     # default tz for `time_between` rules ("" = UTC)
 
 [limits]
 max_uri_len      = 8192

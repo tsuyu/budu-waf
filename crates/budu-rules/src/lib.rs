@@ -24,5 +24,5 @@ pub mod modsec;
 mod ruleset;
 mod stage;
 
-pub use ruleset::{RuleError, RuleSet};
+pub use ruleset::{parse_tz_offset, RuleError, RuleSet};
 pub use stage::{shared_from_path, RulesStage, SharedRules};
