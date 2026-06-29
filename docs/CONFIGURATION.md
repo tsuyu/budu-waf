@@ -28,6 +28,7 @@ All other sections have defaults and may be omitted.
 | `upstream_timeout_secs` | integer > 0 | `30` | Max wait for the backend before answering `504`. |
 | `timezone` | offset string | `""` (UTC) | Default timezone for `time_between` rules, e.g. `"+08:00"`, `"-05:30"`. A per-rule `tz` overrides it. Invalid values are rejected at startup / `check`. |
 | `pidfile` | path | `""` (off) | Where `budu run` writes its PID (removed on exit). Lets `budu ban/unban --reload` signal the running proxy with `SIGHUP`. **Requires `--features fail2ban`** (ignored otherwise, with a warning). |
+| `request_id_header` | string | `X-Request-Id` | Per-request correlation id header. A valid inbound value is reused (trace continuity from the edge); otherwise one is generated. The id is logged, added to audit events, echoed on the response, and forwarded upstream. `""` disables the header (an id is still generated for logs). |
 
 The `listen` address is read once at startup; changing it needs a restart.
 `upstream`, `limits`, `inspect`, and the rule/signature/blocklist sources all

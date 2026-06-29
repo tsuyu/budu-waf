@@ -54,6 +54,9 @@ client ─────────► edge proxy ─────────► 
 - **Auto-refreshing remote blocklist feeds** *(optional feature)*.
 - **Observability**: structured JSON logs, a separate **audit log** sink, and a
   Prometheus **`/metrics`** + **`/healthz`** admin endpoint.
+- **Request correlation**: a per-request id (reused from the edge's
+  `X-Request-Id` or generated) is logged, added to audit events, echoed on the
+  response, and forwarded upstream — trace one request across systems.
 - **Fail2Ban integration** *(optional `fail2ban` feature)*: the audit log records
   the *resolved* client IP, so Fail2Ban can escalate repeat offenders to a WAF or
   firewall ban — drop-in filter/jail/action in [contrib/fail2ban/](contrib/fail2ban/),

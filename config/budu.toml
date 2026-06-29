@@ -8,6 +8,7 @@ enforcement      = "block"                     # block | detect (detect = log-on
 upstream_timeout_secs = 30                     # give up on a hung backend → 504
 timezone         = "+08:00"                     # default tz for `time_between` rules ("" = UTC)
 pidfile          = "/run/budu.pid"              # needs --features fail2ban; enables `budu ban --reload` ("" = off)
+request_id_header = "X-Request-Id"              # per-request correlation id: reuse inbound (if valid) else generate ("" = off)
 
 [limits]
 max_uri_len      = 8192

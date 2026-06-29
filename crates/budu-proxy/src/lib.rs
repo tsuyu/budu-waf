@@ -29,6 +29,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 
 mod admin;
+mod reqid;
 pub use admin::serve_admin;
 
 /// Unified body type for both directions: an upstream/incoming stream or a
@@ -119,15 +120,30 @@ pub async fn run(
 }
 
 impl Proxy {
+    /// Assign/resolve the request id, run the request, then echo the id on the
+    /// response so it appears in logs, the audit trail, and to the client.
     async fn handle(&self, req: Request<Incoming>, peer_ip: IpAddr) -> Response<RespBody> {
-        self.metrics.request();
         // One lock-free config snapshot for the whole request.
         let cfg = self.config.load_full();
+        let id = reqid::resolve(req.headers(), &cfg.server.request_id_header);
+        let mut resp = self.handle_inner(req, peer_ip, cfg.clone(), id.clone()).await;
+        set_request_id(resp.headers_mut(), &cfg.server.request_id_header, &id);
+        resp
+    }
+
+    async fn handle_inner(
+        &self,
+        req: Request<Incoming>,
+        peer_ip: IpAddr,
+        cfg: Arc<Config>,
+        id: Arc<str>,
+    ) -> Response<RespBody> {
+        self.metrics.request();
         let client = resolve_client(&cfg, &req, peer_ip);
-        let (parts, incoming) = req.into_parts();
+        let (mut parts, incoming) = req.into_parts();
         let method = parts.method.clone();
         let path_for_log = parts.uri.path().to_string();
-        tracing::debug!(client_ip = %client.ip, method = %method, path = %path_for_log, "request");
+        tracing::debug!(request_id = %id, client_ip = %client.ip, method = %method, path = %path_for_log, "request");
 
         // Trusted-IP allowlist: a matching client fully bypasses the pipeline —
         // no blocking, no detection, no rate-limit, request *and* response
@@ -135,7 +151,8 @@ impl Proxy {
         if self.pipeline.is_whitelisted(&client.ip) {
             self.metrics.whitelisted();
             self.metrics.record(&WafDecision::Allow);
-            tracing::debug!(client_ip = %client.ip, "allowlisted; bypassing inspection");
+            tracing::debug!(request_id = %id, client_ip = %client.ip, "allowlisted; bypassing inspection");
+            set_request_id(&mut parts.headers, &cfg.server.request_id_header, &id);
             return match self.forward(parts, stream_body(incoming), cfg.clone(), None).await {
                 Ok(resp) => resp,
                 Err(e) => self.on_forward_error(e, &client.ip),
@@ -156,7 +173,7 @@ impl Proxy {
 
         // 1) Early stages on the head alone.
         if let Some(resp) =
-            self.act_on(self.pipeline.evaluate_early(&mut ctx), detect, &client.ip, &method, &path_for_log)
+            self.act_on(self.pipeline.evaluate_early(&mut ctx), detect, &client.ip, &method, &path_for_log, &id)
         {
             return resp;
         }
@@ -167,7 +184,7 @@ impl Proxy {
         let out_body: RespBody = if should_inspect_body(&parts, &cfg) {
             if declared_too_large(&parts, max_body) {
                 return self
-                    .act_on(body_too_large(), false, &client.ip, &method, &path_for_log)
+                    .act_on(body_too_large(), false, &client.ip, &method, &path_for_log, &id)
                     .expect("body-too-large is always enforced");
             }
             match Limited::new(incoming, max_body).collect().await {
@@ -181,7 +198,7 @@ impl Proxy {
                     // Over the inspection limit (or a read error): can't inspect
                     // what we won't buffer — fail closed.
                     return self
-                        .act_on(body_too_large(), false, &client.ip, &method, &path_for_log)
+                        .act_on(body_too_large(), false, &client.ip, &method, &path_for_log, &id)
                         .expect("body-too-large is always enforced");
                 }
             }
@@ -191,7 +208,7 @@ impl Proxy {
 
         // 3) Late stages (signatures + custom rules) with the body available.
         if let Some(resp) =
-            self.act_on(self.pipeline.evaluate_late(&mut ctx), detect, &client.ip, &method, &path_for_log)
+            self.act_on(self.pipeline.evaluate_late(&mut ctx), detect, &client.ip, &method, &path_for_log, &id)
         {
             return resp;
         }
@@ -199,13 +216,14 @@ impl Proxy {
         // ctx is no longer used past here, releasing its borrow of `parts`.
         drop(ctx);
         self.metrics.record(&WafDecision::Allow);
+        set_request_id(&mut parts.headers, &cfg.server.request_id_header, &id);
 
         // 4) Allowed → forward to upstream.
         match self.forward(parts, out_body, cfg.clone(), buffered_len).await {
             // 5) Response phase: run response rules (status/headers always;
             //    the body too when a rule needs it and it fits the limits).
             Ok(resp) => {
-                self.inspect_response(resp, client, detect, method, path_for_log, cfg.clone())
+                self.inspect_response(resp, client, detect, method, path_for_log, cfg.clone(), id)
                     .await
             }
             // No app to fall through to from an inline gate; on_error governs
@@ -240,20 +258,21 @@ impl Proxy {
         ip: &IpAddr,
         method: &Method,
         path: &str,
+        id: &str,
     ) -> Option<Response<RespBody>> {
         match decision {
             WafDecision::Allow => None,
             WafDecision::Block { .. } if detect => {
                 // Would have blocked; in detect mode we forward and just record.
                 self.metrics.would_block();
-                audit_decision(ip, method, path, &decision, false);
+                audit_decision(ip, method, path, &decision, false, id);
                 None
             }
             // Enforced block, or any rate-limit (a capacity control kept in both
             // modes): answer the client now.
             _ => {
                 self.metrics.record(&decision);
-                audit_decision(ip, method, path, &decision, true);
+                audit_decision(ip, method, path, &decision, true, id);
                 Some(decision_response(decision))
             }
         }
@@ -271,6 +290,9 @@ impl Proxy {
     /// buffered bytes. Oversized inspectable bodies are streamed unbuffered
     /// (status/header rules still apply) so large downloads are never held in
     /// memory; a body that overruns the cap mid-stream fails closed (`502`).
+    // Distinct per-request inputs (decision context + correlation id); grouping
+    // them into a struct would only move the plumbing around.
+    #[allow(clippy::too_many_arguments)]
     async fn inspect_response(
         &self,
         resp: Response<RespBody>,
@@ -279,6 +301,7 @@ impl Proxy {
         method: Method,
         path: String,
         cfg: Arc<Config>,
+        id: Arc<str>,
     ) -> Response<RespBody> {
         let max_body = cfg.limits.max_inspect_body.bytes() as usize;
         let buffer = self.pipeline.needs_response_body()
@@ -294,7 +317,7 @@ impl Proxy {
                 path: &path,
                 body: BodyState::NotBuffered,
             });
-            return match self.act_on(decision, detect, &client.ip, &method, &path) {
+            return match self.act_on(decision, detect, &client.ip, &method, &path, &id) {
                 Some(blocked) => blocked,
                 None => resp,
             };
@@ -340,7 +363,7 @@ impl Proxy {
             path: &path,
             body: BodyState::Buffered(bytes.clone()),
         });
-        if let Some(blocked) = self.act_on(decision, detect, &client.ip, &method, &path) {
+        if let Some(blocked) = self.act_on(decision, detect, &client.ip, &method, &path, &id) {
             return blocked; // enforced response block replaces the upstream reply
         }
 
@@ -585,6 +608,7 @@ fn audit_decision(
     path: &str,
     decision: &WafDecision,
     enforced: bool,
+    request_id: &str,
 ) {
     match decision {
         WafDecision::Block {
@@ -594,6 +618,7 @@ fn audit_decision(
         } => {
             tracing::warn!(
                 target: "audit",
+                request_id,
                 client_ip = %ip,
                 method = %method,
                 path,
@@ -607,6 +632,7 @@ fn audit_decision(
         WafDecision::RateLimited { retry_after_secs } => {
             tracing::warn!(
                 target: "audit",
+                request_id,
                 client_ip = %ip,
                 method = %method,
                 path,
@@ -618,5 +644,19 @@ fn audit_decision(
             );
         }
         WafDecision::Allow => {}
+    }
+}
+
+/// Set the request-id header on a header map (response or upstream request), if
+/// the header name is configured and both name+value are valid.
+fn set_request_id(headers: &mut HeaderMap, header_name: &str, id: &str) {
+    if header_name.is_empty() {
+        return;
+    }
+    if let (Ok(name), Ok(value)) = (
+        HeaderName::from_bytes(header_name.as_bytes()),
+        HeaderValue::from_str(id),
+    ) {
+        headers.insert(name, value);
     }
 }

@@ -73,6 +73,15 @@ pub struct ServerConfig {
     /// `budu ban --reload` signal the running proxy with `SIGHUP`. Empty = off.
     #[serde(default)]
     pub pidfile: String,
+    /// Header carrying the per-request correlation id: reused inbound (if valid),
+    /// else generated, and echoed on the response + forwarded upstream. Empty
+    /// disables reading/writing the header (an id is still generated for logs).
+    #[serde(default = "default_request_id_header")]
+    pub request_id_header: String,
+}
+
+fn default_request_id_header() -> String {
+    "X-Request-Id".to_string()
 }
 
 fn default_upstream_timeout() -> u64 {

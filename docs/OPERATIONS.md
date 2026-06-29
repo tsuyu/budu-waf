@@ -89,8 +89,28 @@ as JSON (separate from operational logs), one event per line:
  "reason":"SQL injection: UNION SELECT"},"target":"audit"}
 ```
 
-`rule_id` tells you exactly which signature/rule fired. Rotate this file with
-`logrotate` (copytruncate, since the process holds it open).
+`rule_id` tells you exactly which signature/rule fired. Each line also carries a
+`request_id` (see below). Rotate this file with `logrotate` (copytruncate, since
+the process holds it open).
+
+### Request correlation
+
+Every request gets a correlation id — reused from the inbound
+`[server] request_id_header` (default `X-Request-Id`) when it's a valid token, so
+a trace begun at your edge continues through, otherwise freshly generated. The id
+is:
+
+- on the request's **operational log line** and every **audit event**
+  (`request_id` field),
+- **echoed on the response** (`X-Request-Id`) so the client/edge can correlate,
+- **forwarded upstream**, so your backend logs the same id.
+
+To follow one request end-to-end, grep the id across budu's logs, the audit file,
+and the backend's logs.
+
+> **On metrics:** Prometheus counters are *aggregate* — a unique per-request id
+> must **not** become a label (unbounded cardinality melts a TSDB). Per-request
+> correlation lives in logs/audit/traces; `/metrics` stays aggregate by design.
 
 ### Metrics
 
