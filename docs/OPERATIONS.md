@@ -100,13 +100,18 @@ Every request gets a correlation id — reused from the inbound
 a trace begun at your edge continues through, otherwise freshly generated. The id
 is:
 
-- on the request's **operational log line** and every **audit event**
-  (`request_id` field),
+- on **every log line** emitted while handling the request. The request runs
+  inside a `request` span, so the id also rides the deep pipeline/forward lines
+  (rule `log` matches, upstream-timeout warnings, panics) as a
+  `"span":{"request_id":…}` object — not only the lines that name it explicitly.
+  The request log line and audit events additionally carry it as a top-level
+  `request_id` field for easy grepping.
 - **echoed on the response** (`X-Request-Id`) so the client/edge can correlate,
 - **forwarded upstream**, so your backend logs the same id.
 
 To follow one request end-to-end, grep the id across budu's logs, the audit file,
-and the backend's logs.
+and the backend's logs. (The span is recorded at all log levels, so the id shows
+up even under `BUDU_LOG=error`.)
 
 > **On metrics:** Prometheus counters are *aggregate* — a unique per-request id
 > must **not** become a label (unbounded cardinality melts a TSDB). Per-request

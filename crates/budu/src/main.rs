@@ -366,11 +366,13 @@ fn init_tracing(cfg: &Config) -> anyhow::Result<()> {
         .json()
         .with_filter(env())
         .with_filter(filter_fn(|m| m.target() != "audit"));
-    // file: only the audit target, always.
+    // file: audit-target events only — but also *record every span* (not just
+    // audit ones) so the request-correlation span's `request_id` attaches to
+    // deep audit lines (e.g. `log`-action rule matches emitted inside the engine).
     let audit_layer = fmt::layer()
         .json()
         .with_writer(audit_writer)
-        .with_filter(filter_fn(|m| m.target() == "audit"));
+        .with_filter(filter_fn(|m| m.is_span() || m.target() == "audit"));
 
     tracing_subscriber::registry()
         .with(stdout_layer)

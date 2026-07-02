@@ -27,6 +27,7 @@ use hyper::service::service_fn;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
+use tracing::Instrument;
 
 mod admin;
 mod reqid;
@@ -120,13 +121,21 @@ pub async fn run(
 }
 
 impl Proxy {
-    /// Assign/resolve the request id, run the request, then echo the id on the
-    /// response so it appears in logs, the audit trail, and to the client.
+    /// Assign/resolve the request id, run the request inside a `request` span
+    /// (so the id tags *every* log line emitted while handling it — pipeline,
+    /// forward, upstream warnings), then echo the id on the response.
     async fn handle(&self, req: Request<Incoming>, peer_ip: IpAddr) -> Response<RespBody> {
         // One lock-free config snapshot for the whole request.
         let cfg = self.config.load_full();
         let id = reqid::resolve(req.headers(), &cfg.server.request_id_header);
-        let mut resp = self.handle_inner(req, peer_ip, cfg.clone(), id.clone()).await;
+        // ERROR level so the span is *recorded* regardless of `BUDU_LOG` (a span
+        // emits no line itself — the level only gates whether its fields are
+        // captured, and we want `request_id` on events up to and including error).
+        let span = tracing::error_span!("request", request_id = %id);
+        let mut resp = self
+            .handle_inner(req, peer_ip, cfg.clone(), id.clone())
+            .instrument(span)
+            .await;
         set_request_id(resp.headers_mut(), &cfg.server.request_id_header, &id);
         resp
     }
